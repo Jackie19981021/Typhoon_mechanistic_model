@@ -44,7 +44,6 @@ transformed data {
   matrix[num_basis, T_days] B;
   vector[spline_degree + num_knots] ext_knots_temp;
   vector[2*spline_degree + num_knots] ext_knots;
-  int typhoon_days = typhoon_weeks * 7;
   
   for (t in 1:T_days) {
     X[t] = (t - 1.0) / (T_days - 1.0);
@@ -287,15 +286,30 @@ generated quantities {
   matrix[T_days_total, N_strains] R_eff_daily;
   matrix[T_weeks_total, N_strains] R_eff;
   
-  matrix[T_weeks_total, N_strains] R_eff_scenarios[6];
+  matrix[T_weeks_total, N_strains] R_eff_scenarios[13];
   
   matrix[T_days_total + 1, 19] states_forecast;
   vector[T_days_forecast] daily_incidence_forecast[N_strains];
   vector[T_weeks_forecast] weekly_incidence_forecast[N_strains];
   int forecast_cases[T_weeks_forecast, N_strains];
   
-  real typhoon_effects[6] = {0.0, 0.1, 0.2, 0.4, 0.6, 0.8};
-  int forecast_cases_typhoon[6, T_weeks_forecast, N_strains];
+  real typhoon_effects[13] = {0.0, 0.1, 0.2, 0.6, 0.8, 0.1, 0.2, 0.6, 0.8, 0.1, 0.2, 0.6, 0.8};
+  int typhoon_days_arr[13] = {0, 3, 3, 3, 3, 5, 5, 5, 5, 10, 10, 10, 10};
+  int forecast_cases_typhoon[13, T_weeks_forecast, N_strains];
+  
+  // NEW: Store raw case counts for proper error bar calculation
+  real cases_typhoon_period[13, N_strains];
+  real cases_total_period[13, N_strains];
+  real cases_baseline_typhoon_period[N_strains];
+  real cases_baseline_total_period[N_strains];
+  
+  // NEW: Store reductions as percentages for each draw
+  real reduction_typhoon_period[13, N_strains];
+  real reduction_total_period[13, N_strains];
+  
+  // NEW: Store average weekly cases for period comparison
+  real avg_weekly_typhoon[13, N_strains];
+  real avg_weekly_recovery[13, N_strains];
   
   // 1. Calculate historical R_eff
   for (t in 1:T_days) {
@@ -490,9 +504,16 @@ generated quantities {
     }
   }
   
-  // 6. Typhoon scenario simulations (NOW WITH 6 SCENARIOS)
-  for (typhoon_idx in 1:6) {
+  // NEW: Calculate baseline totals first (scenario 1 = 0% reduction)
+  for (i in 1:N_strains) {
+    cases_baseline_typhoon_period[i] = 0;
+    cases_baseline_total_period[i] = 0;
+  }
+  
+  // 6. Typhoon scenario simulations (WITH 13 SCENARIOS)
+  for (typhoon_idx in 1:13) {
     real typhoon_reduction = typhoon_effects[typhoon_idx];
+    int typhoon_days = typhoon_days_arr[typhoon_idx];
     matrix[T_days_total + 1, 19] states_typhoon;
     vector[T_days_forecast] daily_incidence_typhoon[N_strains];
     matrix[T_days_forecast, N_strains] R_eff_daily_scenario;
@@ -623,7 +644,12 @@ generated quantities {
       }
     }
     
+    // NEW: Calculate metrics for this scenario for each strain
     for (i in 1:N_strains) {
+      real typhoon_total = 0;
+      real total_period = 0;
+      real recovery_total = 0;
+      
       for (w in 1:T_weeks_forecast) {
         real weekly_inc = 0;
         for (d in 1:7) {
@@ -642,7 +668,46 @@ generated quantities {
         
         expected_cases = fmax(0.1, expected_cases);
         forecast_cases_typhoon[typhoon_idx, w, i] = neg_binomial_2_rng(expected_cases, phi[i]);
+        
+        // Accumulate for metrics
+        total_period += expected_cases;
+        if (w <= typhoon_weeks) {
+          typhoon_total += expected_cases;
+        } else {
+          recovery_total += expected_cases;
+        }
       }
+      
+      // Store raw case counts
+      cases_typhoon_period[typhoon_idx, i] = typhoon_total;
+      cases_total_period[typhoon_idx, i] = total_period;
+      
+      // Store baseline (scenario 1)
+      if (typhoon_idx == 1) {
+        cases_baseline_typhoon_period[i] = typhoon_total;
+        cases_baseline_total_period[i] = total_period;
+      }
+      
+      // Calculate percentage reductions for this draw
+      if (typhoon_idx > 1) {
+        // Avoid division by zero
+        real base_typhoon_safe = fmax(cases_baseline_typhoon_period[i], 0.01);
+        real base_total_safe = fmax(cases_baseline_total_period[i], 0.01);
+        
+        reduction_typhoon_period[typhoon_idx, i] = 
+          fmax(0, fmin(100, (1 - typhoon_total / base_typhoon_safe) * 100));
+        reduction_total_period[typhoon_idx, i] = 
+          fmax(0, fmin(100, (1 - total_period / base_total_safe) * 100));
+      } else {
+        // Baseline scenario has 0% reduction
+        reduction_typhoon_period[typhoon_idx, i] = 0;
+        reduction_total_period[typhoon_idx, i] = 0;
+      }
+      
+      // Calculate average weekly cases
+      int n_recovery = T_weeks_forecast - typhoon_weeks;
+      avg_weekly_typhoon[typhoon_idx, i] = typhoon_total / typhoon_weeks;
+      avg_weekly_recovery[typhoon_idx, i] = recovery_total / n_recovery;
     }
   }
 }
