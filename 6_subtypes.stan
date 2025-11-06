@@ -286,30 +286,31 @@ generated quantities {
   matrix[T_days_total, N_strains] R_eff_daily;
   matrix[T_weeks_total, N_strains] R_eff;
   
-  matrix[T_weeks_total, N_strains] R_eff_scenarios[13];
+  matrix[T_weeks_total, N_strains] R_eff_scenarios[20];
   
   matrix[T_days_total + 1, 19] states_forecast;
   vector[T_days_forecast] daily_incidence_forecast[N_strains];
   vector[T_weeks_forecast] weekly_incidence_forecast[N_strains];
   int forecast_cases[T_weeks_forecast, N_strains];
   
-  real typhoon_effects[13] = {0.0, 0.1, 0.2, 0.6, 0.8, 0.1, 0.2, 0.6, 0.8, 0.1, 0.2, 0.6, 0.8};
-  int typhoon_days_arr[13] = {0, 3, 3, 3, 3, 5, 5, 5, 5, 10, 10, 10, 10};
-  int forecast_cases_typhoon[13, T_weeks_forecast, N_strains];
+  real typhoon_effects[20] = {0.0, 0.1, 0.2, 0.4, 0.6, 0.8, 0.1, 0.2, 0.4, 0.6, 0.8, 0.1, 0.2, 0.4, 0.6, 0.8, 0.6, 0.6, 0.6, 0.6};
+  int typhoon_days_arr[20] = {0, 3, 3, 3, 3, 3, 7, 7, 7, 7, 7, 10, 10, 10, 10, 10, 7, 7, 7, 7};
+  int shift_arr[20] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -3, -5, 3, 5};
+  int forecast_cases_typhoon[20, T_weeks_forecast, N_strains];
   
   // NEW: Store raw case counts for proper error bar calculation
-  real cases_typhoon_period[13, N_strains];
-  real cases_total_period[13, N_strains];
+  real cases_typhoon_period[20, N_strains];
+  real cases_total_period[20, N_strains];
   real cases_baseline_typhoon_period[N_strains];
   real cases_baseline_total_period[N_strains];
   
   // NEW: Store reductions as percentages for each draw
-  real reduction_typhoon_period[13, N_strains];
-  real reduction_total_period[13, N_strains];
+  real reduction_typhoon_period[20, N_strains];
+  real reduction_total_period[20, N_strains];
   
   // NEW: Store average weekly cases for period comparison
-  real avg_weekly_typhoon[13, N_strains];
-  real avg_weekly_recovery[13, N_strains];
+  real avg_weekly_typhoon[20, N_strains];
+  real avg_weekly_recovery[20, N_strains];
   
   // 1. Calculate historical R_eff
   for (t in 1:T_days) {
@@ -510,112 +511,282 @@ generated quantities {
     cases_baseline_total_period[i] = 0;
   }
   
-  // 6. Typhoon scenario simulations (WITH 13 SCENARIOS)
-  for (typhoon_idx in 1:13) {
+  // 6. Typhoon scenario simulations (WITH 20 SCENARIOS)
+  for (typhoon_idx in 1:20) {
     real typhoon_reduction = typhoon_effects[typhoon_idx];
     int typhoon_days = typhoon_days_arr[typhoon_idx];
+    int shift = shift_arr[typhoon_idx];
     matrix[T_days_total + 1, 19] states_typhoon;
     vector[T_days_forecast] daily_incidence_typhoon[N_strains];
     matrix[T_days_forecast, N_strains] R_eff_daily_scenario;
-    
-    for (t in 1:(T_days_total + 1)) {
-      for (j in 1:19) {
-        states_typhoon[t, j] = states_forecast[t, j];
-      }
-    }
     
     for (i in 1:N_strains) {
       daily_incidence_typhoon[i] = rep_vector(0, T_days_forecast);
     }
     
-    for (t_rel in 1:T_days_forecast) {
-      int t = T_days + t_rel;
-      real S = states_typhoon[t, 1];
-      vector[N_strains] E;
-      vector[N_strains] I;
-      vector[N_strains] R;
-      vector[N_strains] lambda;
-      vector[N_strains] new_infections;
-      
-      real reduction_factor;
-      if (t_rel <= typhoon_days) {
-        reduction_factor = 1.0 - typhoon_reduction;
-      } else {
-        reduction_factor = 1.0;
-      }
-      
-      for (i in 1:N_strains) {
-        int e_idx = 2 + 3*(i-1);
-        int i_idx = 3 + 3*(i-1);
-        int r_idx = 4 + 3*(i-1);
-        E[i] = states_typhoon[t, e_idx];
-        I[i] = states_typhoon[t, i_idx];
-        R[i] = states_typhoon[t, r_idx];
-      }
-      
-      for (i in 1:N_strains) {
-        lambda[i] = transmission_rate_forecast[i, t_rel] * reduction_factor * I[i];
-        
-        real effective_S = S;
-        for (j in 1:N_strains) {
-          if (j != i) {
-            real immunity_effect = R[j] * (1 - cross_immunity[j,i]);
-            effective_S += immunity_effect;
-          }
+    if (shift >= 0) {
+      // Normal or delayed
+      for (t in 1:(T_days + 1)) {
+        for (j in 1:19) {
+          states_typhoon[t, j] = states[t, j];
         }
-        
-        effective_S = fmax(1e-6, fmin(1.0, effective_S));
-        new_infections[i] = fmin(lambda[i] * effective_S, 0.5 * effective_S);
-        
-        daily_incidence_typhoon[i][t_rel] = sigma[i] * E[i];
       }
       
-      for (i in 1:N_strains) {
-        real S_eff = S;
-        for (j in 1:N_strains) {
-          if (j != i) {
-            real immunity_contribution = R[j] * (1 - cross_immunity[j,i]);
-            S_eff += immunity_contribution;
-          }
-        }
-        S_eff = fmax(0, fmin(1, S_eff));
-        R_eff_daily_scenario[t_rel, i] = R0_forecast[i, t_rel] * reduction_factor * S_eff;
-      }
-      
-      {
-        real dt = 1.0;
-        real dS = -sum(new_infections) + sum(mu .* R);
+      for (t_rel in 1:T_days_forecast) {
+        int t = T_days + t_rel;
+        real S = states_typhoon[t, 1];
+        vector[N_strains] E;
+        vector[N_strains] I;
+        vector[N_strains] R;
+        vector[N_strains] lambda;
+        vector[N_strains] new_infections;
         
-        vector[19] new_state = to_vector(states_typhoon[t,]);
-        new_state[1] = S + dt * dS;
+        real reduction_factor = ((t_rel > shift) && (t_rel <= shift + typhoon_days)) ? 1.0 - typhoon_reduction : 1.0;
         
         for (i in 1:N_strains) {
           int e_idx = 2 + 3*(i-1);
           int i_idx = 3 + 3*(i-1);
           int r_idx = 4 + 3*(i-1);
+          E[i] = states_typhoon[t, e_idx];
+          I[i] = states_typhoon[t, i_idx];
+          R[i] = states_typhoon[t, r_idx];
+        }
+        
+        for (i in 1:N_strains) {
+          lambda[i] = transmission_rate_forecast[i, t_rel] * reduction_factor * I[i];
           
-          real dE = new_infections[i] - sigma[i] * E[i];
-          real dI = sigma[i] * E[i] - gamma[i] * I[i];
-          real dR = gamma[i] * I[i] - mu[i] * R[i];
+          real effective_S = S;
+          for (j in 1:N_strains) {
+            if (j != i) {
+              real immunity_effect = R[j] * (1 - cross_immunity[j,i]);
+              effective_S += immunity_effect;
+            }
+          }
           
-          new_state[e_idx] = E[i] + dt * dE;
-          new_state[i_idx] = I[i] + dt * dI;
-          new_state[r_idx] = R[i] + dt * dR;
+          effective_S = fmax(1e-6, fmin(1.0, effective_S));
+          new_infections[i] = fmin(lambda[i] * effective_S, 0.5 * effective_S);
+          
+          daily_incidence_typhoon[i][t_rel] = sigma[i] * E[i];
         }
         
-        for (j in 1:19) {
-          new_state[j] = fmax(1e-10, new_state[j]);
+        for (i in 1:N_strains) {
+          real S_eff = S;
+          for (j in 1:N_strains) {
+            if (j != i) {
+              real immunity_contribution = R[j] * (1 - cross_immunity[j,i]);
+              S_eff += immunity_contribution;
+            }
+          }
+          S_eff = fmax(0, fmin(1, S_eff));
+          R_eff_daily_scenario[t_rel, i] = R0_forecast[i, t_rel] * reduction_factor * S_eff;
         }
         
-        real total = sum(new_state);
-        if (total > 1e-6) {
-          new_state = new_state / total;
-        } else {
-          new_state = to_vector(states_typhoon[t,]);
+        {
+          real dt = 1.0;
+          real dS = -sum(new_infections) + sum(mu .* R);
+          
+          vector[19] new_state = to_vector(states_typhoon[t,]);
+          new_state[1] = S + dt * dS;
+          
+          for (i in 1:N_strains) {
+            int e_idx = 2 + 3*(i-1);
+            int i_idx = 3 + 3*(i-1);
+            int r_idx = 4 + 3*(i-1);
+            
+            real dE = new_infections[i] - sigma[i] * E[i];
+            real dI = sigma[i] * E[i] - gamma[i] * I[i];
+            real dR = gamma[i] * I[i] - mu[i] * R[i];
+            
+            new_state[e_idx] = E[i] + dt * dE;
+            new_state[i_idx] = I[i] + dt * dI;
+            new_state[r_idx] = R[i] + dt * dR;
+          }
+          
+          for (j in 1:19) {
+            new_state[j] = fmax(1e-10, new_state[j]);
+          }
+          
+          real total = sum(new_state);
+          if (total > 1e-6) {
+            new_state = new_state / total;
+          } else {
+            new_state = to_vector(states_typhoon[t,]);
+          }
+          
+          for (j in 1:19) {
+            states_typhoon[t+1, j] = new_state[j];
+          }
+        }
+      }
+    } else {
+      // Early
+      int pre_days = -shift;
+      int start_historical = T_days - pre_days + 1;
+      vector[19] current_state = to_vector(states[start_historical, ]);
+      
+      // Simulate pre_days with reduction
+      for (pre_t in 1:pre_days) {
+        int historical_t = start_historical + pre_t - 1;
+        real S = current_state[1];
+        vector[N_strains] E;
+        vector[N_strains] I;
+        vector[N_strains] R;
+        vector[N_strains] lambda;
+        vector[N_strains] new_infections;
+        
+        real reduction_factor = 1.0 - typhoon_reduction;
+        
+        for (i in 1:N_strains) {
+          int e_idx = 2 + 3*(i-1);
+          int i_idx = 3 + 3*(i-1);
+          int r_idx = 4 + 3*(i-1);
+          E[i] = current_state[e_idx];
+          I[i] = current_state[i_idx];
+          R[i] = current_state[r_idx];
         }
         
-        for (j in 1:19) {
-          states_typhoon[t+1, j] = new_state[j];
+        for (i in 1:N_strains) {
+          lambda[i] = transmission_rate[i, historical_t] * reduction_factor * I[i];
+          
+          real effective_S = S;
+          for (j in 1:N_strains) {
+            if (j != i) {
+              real immunity_effect = R[j] * (1 - cross_immunity[j,i]);
+              effective_S += immunity_effect;
+            }
+          }
+          
+          effective_S = fmax(1e-6, fmin(1.0, effective_S));
+          new_infections[i] = fmin(lambda[i] * effective_S, 0.5 * effective_S);
+        }
+        
+        {
+          real dt = 1.0;
+          real dS = -sum(new_infections) + sum(mu .* R);
+          
+          vector[19] new_state = current_state;
+          new_state[1] = S + dt * dS;
+          
+          for (i in 1:N_strains) {
+            int e_idx = 2 + 3*(i-1);
+            int i_idx = 3 + 3*(i-1);
+            int r_idx = 4 + 3*(i-1);
+            
+            real dE = new_infections[i] - sigma[i] * E[i];
+            real dI = sigma[i] * E[i] - gamma[i] * I[i];
+            real dR = gamma[i] * I[i] - mu[i] * R[i];
+            
+            new_state[e_idx] = E[i] + dt * dE;
+            new_state[i_idx] = I[i] + dt * dI;
+            new_state[r_idx] = R[i] + dt * dR;
+          }
+          
+          for (j in 1:19) {
+            new_state[j] = fmax(1e-10, new_state[j]);
+          }
+          
+          real total = sum(new_state);
+          if (total > 1e-6) {
+            new_state = new_state / total;
+          } else {
+            new_state = current_state;
+          }
+          
+          current_state = new_state;
+        }
+      }
+      
+      // Set initial forecast state
+      for (j in 1:19) {
+        states_typhoon[T_days + 1, j] = current_state[j];
+      }
+      
+      int remaining_days = typhoon_days - pre_days;
+      
+      for (t_rel in 1:T_days_forecast) {
+        int t = T_days + t_rel;
+        real S = states_typhoon[t, 1];
+        vector[N_strains] E;
+        vector[N_strains] I;
+        vector[N_strains] R;
+        vector[N_strains] lambda;
+        vector[N_strains] new_infections;
+        
+        real reduction_factor = (t_rel <= remaining_days) ? 1.0 - typhoon_reduction : 1.0;
+        
+        for (i in 1:N_strains) {
+          int e_idx = 2 + 3*(i-1);
+          int i_idx = 3 + 3*(i-1);
+          int r_idx = 4 + 3*(i-1);
+          E[i] = states_typhoon[t, e_idx];
+          I[i] = states_typhoon[t, i_idx];
+          R[i] = states_typhoon[t, r_idx];
+        }
+        
+        for (i in 1:N_strains) {
+          lambda[i] = transmission_rate_forecast[i, t_rel] * reduction_factor * I[i];
+          
+          real effective_S = S;
+          for (j in 1:N_strains) {
+            if (j != i) {
+              real immunity_effect = R[j] * (1 - cross_immunity[j,i]);
+              effective_S += immunity_effect;
+            }
+          }
+          
+          effective_S = fmax(1e-6, fmin(1.0, effective_S));
+          new_infections[i] = fmin(lambda[i] * effective_S, 0.5 * effective_S);
+          
+          daily_incidence_typhoon[i][t_rel] = sigma[i] * E[i];
+        }
+        
+        for (i in 1:N_strains) {
+          real S_eff = S;
+          for (j in 1:N_strains) {
+            if (j != i) {
+              real immunity_contribution = R[j] * (1 - cross_immunity[j,i]);
+              S_eff += immunity_contribution;
+            }
+          }
+          S_eff = fmax(0, fmin(1, S_eff));
+          R_eff_daily_scenario[t_rel, i] = R0_forecast[i, t_rel] * reduction_factor * S_eff;
+        }
+        
+        {
+          real dt = 1.0;
+          real dS = -sum(new_infections) + sum(mu .* R);
+          
+          vector[19] new_state = to_vector(states_typhoon[t,]);
+          new_state[1] = S + dt * dS;
+          
+          for (i in 1:N_strains) {
+            int e_idx = 2 + 3*(i-1);
+            int i_idx = 3 + 3*(i-1);
+            int r_idx = 4 + 3*(i-1);
+            
+            real dE = new_infections[i] - sigma[i] * E[i];
+            real dI = sigma[i] * E[i] - gamma[i] * I[i];
+            real dR = gamma[i] * I[i] - mu[i] * R[i];
+            
+            new_state[e_idx] = E[i] + dt * dE;
+            new_state[i_idx] = I[i] + dt * dI;
+            new_state[r_idx] = R[i] + dt * dR;
+          }
+          
+          for (j in 1:19) {
+            new_state[j] = fmax(1e-10, new_state[j]);
+          }
+          
+          real total = sum(new_state);
+          if (total > 1e-6) {
+            new_state = new_state / total;
+          } else {
+            new_state = to_vector(states_typhoon[t,]);
+          }
+          
+          for (j in 1:19) {
+            states_typhoon[t+1, j] = new_state[j];
+          }
         }
       }
     }
