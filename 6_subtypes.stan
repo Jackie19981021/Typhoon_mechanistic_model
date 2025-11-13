@@ -286,8 +286,6 @@ generated quantities {
   matrix[T_days_total, N_strains] R_eff_daily;
   matrix[T_weeks_total, N_strains] R_eff;
   
-  // EXTENDED: Now 61 scenarios (1 baseline + 60 combinations)
-  // Original 20 scenarios kept for backward compatibility
   matrix[T_weeks_total, N_strains] R_eff_scenarios[20];
   
   matrix[T_days_total + 1, 19] states_forecast;
@@ -295,7 +293,6 @@ generated quantities {
   vector[T_weeks_forecast] weekly_incidence_forecast[N_strains];
   int forecast_cases[T_weeks_forecast, N_strains];
   
-  // Original 20 scenarios
   real typhoon_effects[20] = {0.0, 0.1, 0.2, 0.4, 0.6, 0.8, 0.1, 0.2, 0.4, 0.6, 0.8, 0.1, 0.2, 0.4, 0.6, 0.8, 0.6, 0.6, 0.6, 0.6};
   int typhoon_days_arr[20] = {0, 3, 3, 3, 3, 3, 5, 5, 5, 5, 5, 7, 7, 7, 7, 7, 7, 7, 7, 7};
   int shift_arr[20] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -3, -5, 3, 5};
@@ -307,13 +304,10 @@ generated quantities {
   real avg_weekly_typhoon[20, N_strains];
   real avg_weekly_recovery[20, N_strains];
   
-  // NEW: Extended scenarios for Sunburst (61 total: 1 baseline + 60 combinations)
-  // Duration: 3,5,7 days (3 levels)
-  // Intensity: 0.2,0.4,0.6,0.8 (4 levels)
-  // Shift: -5,-3,0,3,5 days (5 levels)
-  // Total: 3*4*5 = 60 + 1 baseline = 61
-  real cases_extended_typhoon[61, N_strains];
-  real reduction_extended_typhoon[61, N_strains];
+  // NEW: Extended scenarios (85 total: 1 baseline + 84 combinations)
+  real cases_extended_typhoon[85, N_strains];
+  real incidence_per10k_extended[85, N_strains];
+  real reduction_extended_typhoon[85, N_strains];
   
   // 1. Calculate historical R_eff
   for (t in 1:T_days) {
@@ -850,7 +844,7 @@ generated quantities {
       
       if (typhoon_idx > 1) {
         real base_typhoon_safe = fmax(cases_baseline_typhoon_period[i], 0.01);
-        reduction_typhoon_period[typhoon_idx, i] = 
+        reduction_typhoon_period[typhoon_idx, i] =
           fmax(0, fmin(100, (1 - typhoon_total / base_typhoon_safe) * 100));
       } else {
         reduction_typhoon_period[typhoon_idx, i] = 0;
@@ -862,29 +856,24 @@ generated quantities {
     }
   }
   
-  // 7. NEW: Calculate extended 61 scenarios for Sunburst
-  // Scenario indexing: idx = 1 (baseline) or 
-  // idx = 2 + (duration_idx-1)*20 + (intensity_idx-1)*5 + (shift_idx-1)
-  // where duration_idx in {1,2,3} for {3,5,7} days
-  //       intensity_idx in {1,2,3,4} for {0.2,0.4,0.6,0.8}
-  //       shift_idx in {1,2,3,4,5} for {-5,-3,0,3,5}
-  
+  // 7. NEW: Calculate extended 85 scenarios for Sunburst
   {
     int durations[3] = {3, 5, 7};
     real intensities[4] = {0.2, 0.4, 0.6, 0.8};
-    int shifts[5] = {-5, -3, 0, 3, 5};
+    int shifts[7] = {-7, -5, -3, 0, 3, 5, 7};
     
     // Baseline (idx=1)
     for (i in 1:N_strains) {
       cases_extended_typhoon[1, i] = cases_baseline_typhoon_period[i];
-      reduction_extended_typhoon[1, i] = 0;
+      incidence_per10k_extended[1, i] = (cases_baseline_typhoon_period[i] / population) * 10000;
+      reduction_extended_typhoon[1, i] = 0.0;
     }
     
-    // All 60 combinations
+    // All 84 combinations (3 × 4 × 7)
     for (dur_idx in 1:3) {
       for (int_idx in 1:4) {
-        for (shift_idx in 1:5) {
-          int scenario_idx = 1 + (dur_idx-1)*20 + (int_idx-1)*5 + shift_idx;
+        for (shift_idx in 1:7) {
+          int scenario_idx = 1 + (dur_idx-1)*28 + (int_idx-1)*7 + shift_idx;
           int typhoon_days_ext = durations[dur_idx];
           real typhoon_reduction_ext = intensities[int_idx];
           int shift_ext = shifts[shift_idx];
@@ -1158,10 +1147,16 @@ generated quantities {
             }
             
             cases_extended_typhoon[scenario_idx, i] = typhoon_total_ext;
+            incidence_per10k_extended[scenario_idx, i] = (typhoon_total_ext / population) * 10000;
             
-            real base_safe = fmax(cases_baseline_typhoon_period[i], 0.01);
-            reduction_extended_typhoon[scenario_idx, i] = 
-              fmax(0, fmin(100, (1 - typhoon_total_ext / base_safe) * 100));
+            // Calculate reduction percentage
+            real base_cases = cases_extended_typhoon[1, i];
+            if (base_cases > 0.01) {
+              reduction_extended_typhoon[scenario_idx, i] = 
+                fmax(0, fmin(100, (1 - typhoon_total_ext / base_cases) * 100));
+            } else {
+              reduction_extended_typhoon[scenario_idx, i] = 0.0;
+            }
           }
         }
       }

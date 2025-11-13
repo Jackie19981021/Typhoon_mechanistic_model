@@ -20,7 +20,7 @@ raw_data <- read.csv(data_path)
 raw_data$date <- as.Date(raw_data$date, format = "%Y/%m/%d")
 
 start_date <- as.Date("2023-01-07")
-typhoon_start_date <- as.Date("2025-09-23")
+typhoon_start_date <- as.Date("2025-09-20")
 end_date <- as.Date("2025-10-25")
 
 fitting_data <- raw_data[raw_data$date >= start_date & raw_data$date < typhoon_start_date, ]
@@ -89,7 +89,7 @@ cat("Note: Now computing 61 scenarios (1 baseline + 60 combinations)\n\n")
 saveRDS(fit, file = "/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/typhoon_model_fit_extended.rds")
 
 cat("=== LOADING PREVIOUS FIT ===\n")
-fit <- readRDS("/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/typhoon_model_fit_extended.rds")
+#fit <- readRDS("/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/typhoon_model_fit_extended.rds")
 
 # [Extract results - ORIGINAL 20 scenarios UNCHANGED]
 pred_cases <- rstan::extract(fit, pars = "pred_cases")$pred_cases
@@ -104,9 +104,10 @@ avg_weekly_typhoon <- rstan::extract(fit, pars = "avg_weekly_typhoon")$avg_weekl
 avg_weekly_recovery <- rstan::extract(fit, pars = "avg_weekly_recovery")$avg_weekly_recovery
 
 # NEW: Extract extended scenarios
+# NEW: Extract extended scenarios
 cases_extended <- rstan::extract(fit, pars = "cases_extended_typhoon")$cases_extended_typhoon
+incidence_per10k_extended <- rstan::extract(fit, pars = "incidence_per10k_extended")$incidence_per10k_extended
 reduction_extended <- rstan::extract(fit, pars = "reduction_extended_typhoon")$reduction_extended_typhoon
-
 cat("\n=== Checking extracted dimensions ===\n")
 cat("pred_cases dimensions:", dim(pred_cases), "\n")
 cat("forecast_cases dimensions:", dim(forecast_cases), "\n")
@@ -1690,22 +1691,53 @@ for (typhoon_idx in 2:20) {
 
 
 
-# NEW FIGURE 14: STATIC SUNBURST CHART FOR ALL 60 EXTENDED SCENARIOS
-# ============================================================================
-cat("\n=== Creating Figure 14: Static Sunburst Chart for Extended Scenarios ===\n")
 
-# Calculate mean reductions across all posterior draws for extended scenarios
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ============================================================================
+# Calculate mean values for extended scenarios
+# ============================================================================
+cat("\n=== Calculating extended scenario statistics ===\n")
+
+# Calculate mean across posterior samples
+incidence_per10k_mean <- apply(incidence_per10k_extended, c(2,3), mean)
 reduction_extended_mean <- apply(reduction_extended, c(2,3), mean)
+
+cat("incidence_per10k_mean dimensions:", dim(incidence_per10k_mean), "\n")
+cat("reduction_extended_mean dimensions:", dim(reduction_extended_mean), "\n")
+
+# ============================================================================
+# FIGURE 14A: COMBINED SUNBURST CHART - All 6 strains in one figure
+# Using manual approach for independent color scales per strain
+# ============================================================================
+cat("\n=== Creating Figure 14A: Combined Sunburst Chart (6 strains, 2x3 layout) ===\n")
 
 # Build scenario labels
 durations <- c(3, 5, 7)
 intensities <- c(0.2, 0.4, 0.6, 0.8)
-shifts <- c(-5, -3, 0, 3, 5)
+shifts <- c(-7, -5, -3, 0, 3, 5, 7)
 
-# Create static sunburst using ggplot2 with polar coordinates
-# Each ring represents: Inner=Duration, Middle=Intensity, Outer=Timing
+cat("Total scenarios:", nrow(incidence_per10k_mean), "\n")
 
-create_static_sunburst <- function(strain_idx) {
+# ============================================================================
+# Create sunburst data with variable outer ring extensions
+# ============================================================================
+create_extension_sunburst <- function(strain_idx) {
   sunburst_data <- data.frame()
   
   # Build hierarchical structure
@@ -1715,14 +1747,22 @@ create_static_sunburst <- function(strain_idx) {
     for (int_idx in 1:4) {
       int_val <- intensities[int_idx]
       
-      for (shift_idx in 1:5) {
+      # Extract all 7 timing incidences for this group
+      temp_incidences <- numeric(7)
+      for (shift_idx in 1:7) {
+        scenario_idx <- 1 + (dur_idx-1)*28 + (int_idx-1)*7 + shift_idx
+        temp_incidences[shift_idx] <- incidence_per10k_mean[scenario_idx, strain_idx]
+      }
+      
+      # Calculate group-wise min/max for normalization
+      max_inc_group <- max(temp_incidences)
+      min_inc_group <- min(temp_incidences)
+      
+      # Now process each of the 7 timing scenarios
+      for (shift_idx in 1:7) {
         shift_val <- shifts[shift_idx]
-        scenario_idx <- 1 + (dur_idx-1)*20 + (int_idx-1)*5 + shift_idx
-        red_val <- reduction_extended_mean[scenario_idx, strain_idx]
-        
-        # Calculate angular positions
-        # Outer ring: 60 segments (3 durations × 4 intensities × 5 shifts)
-        segment_idx <- (dur_idx-1)*20 + (int_idx-1)*5 + shift_idx
+        scenario_idx <- 1 + (dur_idx-1)*28 + (int_idx-1)*7 + shift_idx
+        incidence_val <- incidence_per10k_mean[scenario_idx, strain_idx]
         
         # Timing labels
         if (shift_val < 0) {
@@ -1733,131 +1773,169 @@ create_static_sunburst <- function(strain_idx) {
           shift_label <- "On"
         }
         
+        segment_idx <- (dur_idx-1)*28 + (int_idx-1)*7 + shift_idx
+        
+        # Group-wise normalization for EXTENSION LENGTH
+        if (max_inc_group > min_inc_group) {
+          extension_length <- 0.3 + 0.9 * (incidence_val - min_inc_group) /
+            (max_inc_group - min_inc_group)
+        } else {
+          extension_length <- 0.75
+        }
+        
+        # Calculate angular positions (84 equal segments)
+        theta_start <- (segment_idx - 1) * (360 / 84)
+        theta_end <- segment_idx * (360 / 84)
+        theta_mid <- (theta_start + theta_end) / 2
+        
         sunburst_data <- rbind(sunburst_data, data.frame(
           duration = dur_days,
           intensity = int_val * 100,
           shift = shift_val,
           shift_label = shift_label,
-          reduction = red_val,
+          incidence = incidence_val,
           segment_idx = segment_idx,
           dur_idx = dur_idx,
           int_idx = int_idx,
           shift_idx = shift_idx,
+          extension_length = extension_length,
+          theta_start = theta_start,
+          theta_end = theta_end,
+          theta_mid = theta_mid,
+          group_id = paste(dur_idx, int_idx, sep = "_"),
           stringsAsFactors = FALSE
         ))
       }
     }
   }
   
-  # Calculate angular positions for each layer
-  sunburst_data$theta_start <- (sunburst_data$segment_idx - 1) * (360 / 60)
-  sunburst_data$theta_end <- sunburst_data$segment_idx * (360 / 60)
-  sunburst_data$theta_mid <- (sunburst_data$theta_start + sunburst_data$theta_end) / 2
+  return(sunburst_data)
+}
+
+# Create individual plots for each strain, then combine with patchwork
+library(patchwork)
+
+create_individual_sunburst_subplot <- function(strain_idx) {
+  strain_name <- strain_names[strain_idx]
   
-  # Create plot
+  # Get data for this strain
+  sunburst_data <- create_extension_sunburst(strain_idx)
+  
+  # Calculate aggregated data for inner and middle rings
+  duration_data <- sunburst_data %>%
+    group_by(dur_idx) %>%
+    summarise(
+      theta_start = min(theta_start),
+      theta_end = max(theta_end),
+      theta_mid = (min(theta_start) + max(theta_end)) / 2,
+      duration = first(duration),
+      .groups = "drop"
+    )
+  
+  intensity_data <- sunburst_data %>%
+    group_by(dur_idx, int_idx) %>%
+    summarise(
+      theta_start = min(theta_start),
+      theta_end = max(theta_end),
+      theta_mid = (min(theta_start) + max(theta_end)) / 2,
+      intensity = first(intensity),
+      .groups = "drop"
+    )
+  
+  # Create plot with independent color scale
   p <- ggplot() +
-    # Outer ring: Individual scenarios colored by reduction
+    # Outer ring: variable xmax for extension
     geom_rect(
       data = sunburst_data,
-      aes(xmin = 2.5, xmax = 3.5, 
-          ymin = theta_start, ymax = theta_end,
-          fill = reduction),
-      color = "white", size = 0.3
+      aes(xmin = 2.5,
+          xmax = 2.5 + extension_length * 1.5,
+          ymin = theta_start,
+          ymax = theta_end,
+          fill = incidence),
+      color = "white", size = 0.15
     ) +
+    
     # Middle ring: Intensity levels
     geom_rect(
-      data = sunburst_data %>% 
-        group_by(dur_idx, int_idx) %>% 
-        summarise(
-          theta_start = min(theta_start),
-          theta_end = max(theta_end),
-          theta_mid = (min(theta_start) + max(theta_end)) / 2,
-          intensity = first(intensity),
-          .groups = "drop"
-        ),
-      aes(xmin = 1.5, xmax = 2.5, 
+      data = intensity_data,
+      aes(xmin = 1.5, xmax = 2.5,
           ymin = theta_start, ymax = theta_end),
-      fill = "gray85", color = "white", size = 0.5
+      fill = "gray85", color = "white", size = 0.25
     ) +
+    
     # Inner ring: Duration levels
     geom_rect(
-      data = sunburst_data %>% 
-        group_by(dur_idx) %>% 
-        summarise(
-          theta_start = min(theta_start),
-          theta_end = max(theta_end),
-          theta_mid = (min(theta_start) + max(theta_end)) / 2,
-          duration = first(duration),
-          .groups = "drop"
-        ),
-      aes(xmin = 0.5, xmax = 1.5, 
+      data = duration_data,
+      aes(xmin = 0.5, xmax = 1.5,
           ymin = theta_start, ymax = theta_end),
-      fill = "gray70", color = "white", size = 0.8
+      fill = "gray70", color = "white", size = 0.4
     ) +
-    # Add text labels for duration (inner ring)
+    
+    # Labels for duration
     geom_text(
-      data = sunburst_data %>% 
-        group_by(dur_idx) %>% 
-        summarise(
-          theta_mid = (min(theta_start) + max(theta_end)) / 2,
-          duration = first(duration),
-          .groups = "drop"
-        ),
-      aes(x = 1, y = theta_mid, 
+      data = duration_data,
+      aes(x = 1, y = theta_mid,
           label = paste0(duration, "d"),
           angle = ifelse(theta_mid > 180, theta_mid - 90, theta_mid + 90)),
-      size = 4, fontface = "bold", color = "black"
+      size = 2.5, fontface = "bold", color = "black"
     ) +
-    # Add text labels for intensity (middle ring)
+    
+    # Labels for intensity
     geom_text(
-      data = sunburst_data %>% 
-        group_by(dur_idx, int_idx) %>% 
-        summarise(
-          theta_mid = (min(theta_start) + max(theta_end)) / 2,
-          intensity = first(intensity),
-          .groups = "drop"
-        ),
-      aes(x = 2, y = theta_mid, 
+      data = intensity_data,
+      aes(x = 2, y = theta_mid,
           label = paste0(intensity, "%"),
           angle = ifelse(theta_mid > 180, theta_mid - 90, theta_mid + 90)),
-      size = 2.5, color = "black"
+      size = 1.8, color = "black"
     ) +
-    # Add text labels for timing (outer ring) - only show some to avoid clutter
+    
+    # Scenario names INSIDE the outer ring
     geom_text(
-      data = sunburst_data %>% 
-        filter(shift_idx %in% c(1, 3, 5)),  # Show only E5, On, D5
-      aes(x = 3, y = theta_mid, 
+      data = sunburst_data,
+      aes(x = 2.5 + (extension_length * 1.5) * 0.5,
+          y = theta_mid,
           label = shift_label,
           angle = ifelse(theta_mid > 180, theta_mid - 90, theta_mid + 90)),
-      size = 1.8, color = "white", fontface = "bold"
+      size = 1.0, color = "white", fontface = "bold"
     ) +
-    # Color scale
+    
+    # Incidence values OUTSIDE the extended outer ring
+    geom_text(
+      data = sunburst_data,
+      aes(x = 2.5 + extension_length * 1.5 + 0.15,
+          y = theta_mid,
+          label = sprintf("%.1f", incidence),
+          angle = ifelse(theta_mid > 180, theta_mid - 90, theta_mid + 90)),
+      size = 0.8, color = "gray20", fontface = "plain"
+    ) +
+    
+    # Color scale: independent for each strain
     scale_fill_gradientn(
-      colors = c("#E0E0E0", "#FFF59D", "#FFC107", "#FF9800", "#E64A19"),
-      values = scales::rescale(c(0, 15, 30, 50, 80)),
-      limits = c(0, max(sunburst_data$reduction, na.rm = TRUE)),
-      name = "Reduction\n(%)",
+      colors = c("#1A9641", "#A6D96A", "#FFFFBF", "#FDAE61", "#D7191C"),
+      values = scales::rescale(c(0, 25, 50, 75, 100)),
+      limits = c(min(sunburst_data$incidence), max(sunburst_data$incidence)),
+      name = "Incidence\n(per 10K)",
       guide = guide_colorbar(
-        barwidth = 1.5,
-        barheight = 15,
+        barwidth = 0.6,
+        barheight = 6,
         title.position = "top",
-        title.hjust = 0.5
+        title.hjust = 0.5,
+        title.theme = element_text(size = 7, face = "bold"),
+        label.theme = element_text(size = 6)
       )
     ) +
+    
     coord_polar(theta = "y") +
-    xlim(0, 4) +
-    labs(
-      title = paste0("Typhoon Impact Scenarios: ", strain_names[strain_idx]),
-      subtitle = "Inner ring: Duration (3d/5d/7d) | Middle ring: Intensity (20%/40%/60%/80%)\nOuter ring: Timing (E=Early, D=Delayed, On=On time) | Color: Case Reduction %"
-    ) +
-    theme_void() +
+    xlim(0, 5.5) +
+    
+    labs(title = strain_name) +
+    
+    theme_void(base_size = 10) +
     theme(
-      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
-      plot.subtitle = element_text(size = 9, hjust = 0.5, color = "gray30", margin = margin(b = 10)),
+      plot.title = element_text(size = 11, face = "bold", hjust = 0.5, margin = margin(b = 3)),
       legend.position = "right",
-      legend.title = element_text(size = 10, face = "bold"),
-      legend.text = element_text(size = 9),
-      plot.margin = margin(10, 10, 10, 10),
+      legend.justification = "center",
+      plot.margin = margin(5, 5, 5, 5),
       plot.background = element_rect(fill = "white", color = NA),
       panel.background = element_rect(fill = "white", color = NA)
     )
@@ -1865,55 +1943,79 @@ create_static_sunburst <- function(strain_idx) {
   return(p)
 }
 
-# Create sunburst for each strain
-for (strain_idx in 1:N_strains) {
-  p_sunburst <- create_static_sunburst(strain_idx)
-  print(p_sunburst)
-  
-  ggsave(
-    filename = paste0("figure14_sunburst_", strain_names[strain_idx], ".png"),
-    plot = p_sunburst,
-    width = 10,
-    height = 10,
-    dpi = 300,
-    bg = "white"
+cat("\n=== Creating individual sunburst subplots ===\n")
+
+# Create all 6 subplots
+p1 <- create_individual_sunburst_subplot(1)  # B
+p2 <- create_individual_sunburst_subplot(2)  # H3
+p3 <- create_individual_sunburst_subplot(3)  # H1
+p4 <- create_individual_sunburst_subplot(4)  # COVID
+p5 <- create_individual_sunburst_subplot(5)  # RSV
+p6 <- create_individual_sunburst_subplot(6)  # HFMD
+
+# Combine using patchwork
+p14a_combined <- (p1 | p2 | p3) / (p4 | p5 | p6) +
+  plot_annotation(
+    title = "Typhoon Impact Scenarios: Case Incidence per 10,000 Population",
+    subtitle = "Inner: Duration (3d/5d/7d) | Middle: Intensity (20%/40%/60%/80%) | Outer: Timing (E=Early, D=Delayed, On=On time)\nExtension length = relative incidence within intensity group | Color: green = lower, red = higher | Each strain has independent color scale",
+    theme = theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 10, hjust = 0.5, color = "gray30", lineheight = 1.2)
+    )
   )
-  
-  cat(paste0("Saved static sunburst for ", strain_names[strain_idx], "\n"))
-}
 
-# Create a combined summary table
-cat("\n=== Extended Scenarios Summary ===\n")
-cat("Total scenarios computed: 61 (1 baseline + 60 combinations)\n")
-cat("Duration levels: 3, 5, 7 days\n")
-cat("Intensity levels: 20%, 40%, 60%, 80%\n")
-cat("Timing shifts: Early 5d, Early 3d, On time, Delayed 3d, Delayed 5d\n\n")
+print(p14a_combined)
 
-# Print sample of reductions
-cat("Sample reductions for COVID strain:\n")
-covid_idx <- 4
-for (dur_idx in 1:3) {
-  cat(sprintf("\n%d days duration:\n", durations[dur_idx]))
-  for (int_idx in 1:4) {
-    cat(sprintf("  %d%% intensity:\n", as.integer(intensities[int_idx] * 100)))
-    for (shift_idx in 1:5) {
-      scenario_idx <- 1 + (dur_idx-1)*20 + (int_idx-1)*5 + shift_idx
-      shift_val <- shifts[shift_idx]
-      shift_label <- if(shift_val < 0) paste0("Early ", abs(shift_val), "d") else if(shift_val > 0) paste0("Delayed ", shift_val, "d") else "On time"
-      cat(sprintf("    %s: %.1f%%\n", shift_label, reduction_extended_mean[scenario_idx, covid_idx]))
-    }
-  }
-}
+ggsave(
+  filename = "figure14a_sunburst_combined_6strains.png",
+  plot = p14a_combined,
+  width = 20,
+  height = 13,
+  dpi = 300,
+  bg = "white"
+)
 
-# Create static ggplot alternative (grid of bars)
-cat("\n=== Creating Figure 14b: Static Grid Alternative ===\n")
+cat("\nSaved: figure14a_sunburst_combined_6strains.png\n")
 
-# Prepare data for grid plot
+# ============================================================================
+# Print verification
+# ============================================================================
+cat("\n=== Verification of Variable Outer Ring Extension Design ===\n")
+cat("Key design:\n")
+cat("1. All 6 strains in one figure (2 rows × 3 columns)\n")
+cat("2. Each strain has independent color scale and color bar\n")
+cat("3. Outer ring: FIXED xmin=2.5, VARIABLE xmax based on incidence\n")
+cat("4. Longer extension = higher incidence within each intensity group\n")
+cat("5. Scenario names inside extended ring\n")
+cat("6. Incidence values outside the extended ring\n\n")
+
+# Get sample data for verification
+sample_data <- create_extension_sunburst(1)  # B strain
+sample_group <- sample_data %>%
+  filter(duration == 3, intensity == 20) %>%
+  arrange(shift) %>%
+  select(shift_label, incidence, extension_length, theta_mid)
+
+cat("Sample verification for strain B, 3 days, 20% intensity:\n")
+print(sample_group)
+
+cat("\nExtension length verification:\n")
+cat("Shortest extension:", sample_group$shift_label[which.min(sample_group$extension_length)],
+    "=", min(sample_group$extension_length), "\n")
+cat("Longest extension:", sample_group$shift_label[which.max(sample_group$extension_length)],
+    "=", max(sample_group$extension_length), "\n")
+cat("Extension range: 0.3 to 1.2 units (multiplied by 1.5 in plot)\n")
+
+# ============================================================================
+# FIGURE 14B: Heatmap Grid for all scenarios
+# ============================================================================
+cat("\n=== Creating Figure 14B: Reduction Heatmap ===\n")
+
 grid_data_list <- list()
 for (dur_idx in 1:3) {
   for (int_idx in 1:4) {
-    for (shift_idx in 1:5) {
-      scenario_idx <- 1 + (dur_idx-1)*20 + (int_idx-1)*5 + shift_idx
+    for (shift_idx in 1:7) {
+      scenario_idx <- 1 + (dur_idx-1)*28 + (int_idx-1)*7 + shift_idx
       
       for (strain_idx in 1:N_strains) {
         grid_data_list[[length(grid_data_list) + 1]] <- data.frame(
@@ -1932,18 +2034,19 @@ for (dur_idx in 1:3) {
 grid_df <- do.call(rbind, grid_data_list)
 grid_df$strain <- factor(grid_df$strain, levels = strain_names)
 
-p14_grid <- ggplot(grid_df, aes(x = shift, y = intensity, fill = reduction)) +
+p14b_grid <- ggplot(grid_df, aes(x = shift, y = intensity, fill = reduction)) +
   geom_tile(color = "white", size = 0.5) +
   geom_text(aes(label = sprintf("%.0f", reduction)), size = 2.5, color = "black") +
-  facet_grid(duration ~ strain, 
+  facet_grid(duration ~ strain,
              labeller = labeller(duration = function(x) paste(x, "days"))) +
   scale_fill_viridis_c(option = "plasma", begin = 0.1, end = 0.9,
-                       name = "Reduction\n(%)", 
+                       name = "Reduction\n(%)",
                        limits = c(0, max(grid_df$reduction))) +
-  scale_x_discrete(labels = c("-5" = "E5", "-3" = "E3", "0" = "On", "3" = "D3", "5" = "D5")) +
+  scale_x_discrete(labels = c("-7" = "E7", "-5" = "E5", "-3" = "E3", "0" = "On", 
+                              "3" = "D3", "5" = "D5", "7" = "D7")) +
   labs(
     title = "Typhoon Impact: Case Reduction by Duration, Intensity, and Timing",
-    subtitle = "Values show percentage reduction in cases during typhoon period\nColumns: Strains | Rows: Duration | X-axis: Timing (E=Early, D=Delayed, On=On time) | Y-axis: Intensity",
+    subtitle = "Values show percentage reduction in cases during typhoon period (compared to baseline)\nColumns: Strains | Rows: Duration | X-axis: Timing (E=Early, D=Delayed, On=On time) | Y-axis: Intensity",
     x = "Timing Shift (days)",
     y = "Transmission Reduction Intensity"
   ) +
@@ -1961,14 +2064,17 @@ p14_grid <- ggplot(grid_df, aes(x = shift, y = intensity, fill = reduction)) +
     plot.subtitle = element_text(size = 8, color = "gray30")
   )
 
-print(p14_grid)
-ggsave("figure14_extended_scenarios_grid.png", p14_grid,
+print(p14b_grid)
+ggsave("figure14b_reduction_heatmap.png", p14b_grid,
        width = 16, height = 10, dpi = 300, bg = "white")
 
+cat("\n=== Figure 14 Complete ===\n")
+cat("Generated files:\n")
+cat("  Combined sunburst (1 file):\n")
+cat("    - figure14a_sunburst_combined_6strains.png (2×3 layout, each with independent color bar)\n")
+cat("  Heatmap grid (1 file):\n")
+cat("    - figure14b_reduction_heatmap.png\n")
 
-
-cat("\n=== Analysis Complete ===\n")
-cat("All 14 figures have been generated successfully.\n")
-cat("IMPORTANT: The reduction percentages now represent the effect during TYPHOON PERIOD ONLY (1 week),\n")
-cat("comparing each scenario to the baseline during the same 1-week period.\n")                   
-                   
+cat("\n=== All Figure 14 visualizations complete ===\n")
+cat("IMPORTANT: Each strain has its own independent color scale in the combined figure.\n")
+cat("The outer ring extension length represents relative incidence within each intensity group.\n")
