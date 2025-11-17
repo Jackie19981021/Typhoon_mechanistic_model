@@ -31,6 +31,11 @@ data {
   int<lower=2> spline_degree;
   real<lower=0> population;
   int<lower=0> typhoon_weeks;
+  
+  // NEW: Week indices for attack rate periods
+  int<lower=1,upper=T_weeks> period1_start_week;
+  int<lower=1,upper=T_weeks> period1_end_week;
+  int<lower=1> period2_weeks_forecast;
 }
 
 transformed data {
@@ -39,6 +44,7 @@ transformed data {
   int T_days_forecast = T_weeks_forecast * 7;
   int T_days_total = T_weeks_total * 7;
   int num_basis = num_knots + spline_degree - 1;
+  
   real X[T_days];
   vector[num_knots] knots;
   matrix[num_basis, T_days] B;
@@ -66,13 +72,16 @@ transformed data {
 parameters {
   simplex[19] init_state;
   row_vector[num_basis] log_R0_spline_coeff[N_strains];
+  
   real<lower=0,upper=1> cross_immunity_flu;
   real<lower=0,upper=1> cross_immunity_flu_covid;
   real<lower=0,upper=1> cross_immunity_flu_rsv;
   real<lower=0,upper=1> cross_immunity_covid_rsv;
+  
   vector<lower=0.05,upper=1>[N_strains] sigma;
   vector<lower=0,upper=1>[N_strains] gamma;
   vector<lower=0,upper=0.05>[N_strains] mu;
+  
   vector<lower=0,upper=1>[5] detection_rate;
   real<lower=0,upper=0.01> hospitalization_rate;
   vector<lower=0>[N_strains] phi;
@@ -280,34 +289,94 @@ model {
 }
 
 generated quantities {
+  
   int pred_cases[T_weeks, N_strains];
   matrix[T_weeks, N_strains] log_lik;
   
   matrix[T_days_total, N_strains] R_eff_daily;
   matrix[T_weeks_total, N_strains] R_eff;
   
-  matrix[T_weeks_total, N_strains] R_eff_scenarios[20];
+  matrix[T_weeks_total, N_strains] R_eff_scenarios[47];
   
   matrix[T_days_total + 1, 19] states_forecast;
   vector[T_days_forecast] daily_incidence_forecast[N_strains];
   vector[T_weeks_forecast] weekly_incidence_forecast[N_strains];
   int forecast_cases[T_weeks_forecast, N_strains];
   
-  real typhoon_effects[20] = {0.0, 0.1, 0.2, 0.4, 0.6, 0.8, 0.1, 0.2, 0.4, 0.6, 0.8, 0.1, 0.2, 0.4, 0.6, 0.8, 0.6, 0.6, 0.6, 0.6};
-  int typhoon_days_arr[20] = {0, 3, 3, 3, 3, 3, 5, 5, 5, 5, 5, 7, 7, 7, 7, 7, 7, 7, 7, 7};
-  int shift_arr[20] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -3, -5, 3, 5};
-  int forecast_cases_typhoon[20, T_weeks_forecast, N_strains];
+  real typhoon_effects[47];
+  int typhoon_days_arr[47];
+  int shift_arr[47];
+  int forecast_cases_typhoon[47, T_weeks_forecast, N_strains];
   
-  real cases_typhoon_period[20, N_strains];
+  real cases_typhoon_period[47, N_strains];
   real cases_baseline_typhoon_period[N_strains];
-  real reduction_typhoon_period[20, N_strains];
-  real avg_weekly_typhoon[20, N_strains];
-  real avg_weekly_recovery[20, N_strains];
+  real reduction_typhoon_period[47, N_strains];
+  real avg_weekly_typhoon[47, N_strains];
+  real avg_weekly_recovery[47, N_strains];
   
-  // NEW: Extended scenarios (85 total: 1 baseline + 84 combinations)
-  real cases_extended_typhoon[85, N_strains];
-  real incidence_per10k_extended[85, N_strains];
-  real reduction_extended_typhoon[85, N_strains];
+  real cases_extended_typhoon[281, N_strains];
+  real incidence_per10k_extended[281, N_strains];
+  real reduction_extended_typhoon[281, N_strains];
+  
+  real attack_rate_baseline[N_strains];
+  real attack_rate_scenarios[47, N_strains];
+  real attack_rate_diff[47, N_strains];
+  
+  // NEW: Attack rates for specific time periods
+  // Period 1: period1_start_week to period1_end_week (e.g., 2025-07-12 to 2025-09-27)
+  // Period 2: period1_start_week to period1_end_week + period2_weeks_forecast (e.g., 2025-07-12 to 2025-10-18)
+  
+  real attack_rate_period1_historical[N_strains];
+  real attack_rate_period1_baseline[N_strains];
+  real attack_rate_period1_scenarios[47, N_strains];
+  real attack_rate_period1_extended[281, N_strains];
+  
+  real attack_rate_period2_historical[N_strains];
+  real attack_rate_period2_baseline[N_strains];
+  real attack_rate_period2_scenarios[47, N_strains];
+  real attack_rate_period2_extended[281, N_strains];
+  
+  // Define scenario parameters
+  {
+    typhoon_effects[1] = 0.0;
+    typhoon_days_arr[1] = 0;
+    shift_arr[1] = 0;
+    
+    real intensities[10] = {-0.50, -0.30, -0.20, -0.10, -0.05, 0.05, 0.10, 0.20, 0.30, 0.50};
+    int durations[4] = {3, 7, 10, 14};
+    
+    for (dur_idx in 1:4) {
+      for (int_idx in 1:10) {
+        int idx = 1 + (dur_idx-1)*10 + int_idx;
+        typhoon_effects[idx] = intensities[int_idx];
+        typhoon_days_arr[idx] = durations[dur_idx];
+        shift_arr[idx] = 0;
+      }
+    }
+    
+    int shifts_nonzero[6] = {-7, -5, -3, 3, 5, 7};
+    for (shift_idx in 1:6) {
+      int idx = 41 + shift_idx;
+      typhoon_effects[idx] = -0.50;
+      typhoon_days_arr[idx] = 7;
+      shift_arr[idx] = shifts_nonzero[shift_idx];
+    }
+  }
+  
+  // Calculate historical attack rates for both periods
+  for (i in 1:N_strains) {
+    real cumulative_period1 = 0;
+    real cumulative_period2 = 0;
+    
+    // Period 1: from period1_start_week to period1_end_week
+    for (w in period1_start_week:period1_end_week) {
+      cumulative_period1 += weekly_incidence[i][w];
+    }
+    attack_rate_period1_historical[i] = cumulative_period1;
+    
+    // Period 2: from period1_start_week to period1_end_week (same as period 1 for historical)
+    attack_rate_period2_historical[i] = cumulative_period1;
+  }
   
   // 1. Calculate historical R_eff
   for (t in 1:T_days) {
@@ -506,9 +575,42 @@ generated quantities {
     cases_baseline_typhoon_period[i] = 0;
   }
   
-  // 6. Original 20 typhoon scenario simulations (UNCHANGED)
-  for (typhoon_idx in 1:20) {
-    real typhoon_reduction = typhoon_effects[typhoon_idx];
+  // Calculate baseline attack rate (up to T_weeks - 2)
+  {
+    int attack_rate_end = T_weeks - 2;
+    for (i in 1:N_strains) {
+      real cumulative_incidence = 0;
+      for (w in 1:attack_rate_end) {
+        cumulative_incidence += weekly_incidence[i][w];
+      }
+      attack_rate_baseline[i] = cumulative_incidence;
+    }
+  }
+  
+  // Calculate baseline attack rates for both new periods
+  for (i in 1:N_strains) {
+    real cumulative_period1 = 0;
+    real cumulative_period2 = 0;
+    
+    // Period 1: only historical data (period1_start_week to period1_end_week)
+    for (w in period1_start_week:period1_end_week) {
+      cumulative_period1 += weekly_incidence[i][w];
+    }
+    attack_rate_period1_baseline[i] = cumulative_period1;
+    
+    // Period 2: historical + forecast weeks
+    for (w in period1_start_week:period1_end_week) {
+      cumulative_period2 += weekly_incidence[i][w];
+    }
+    for (w_forecast in 1:period2_weeks_forecast) {
+      cumulative_period2 += weekly_incidence_forecast[i][w_forecast];
+    }
+    attack_rate_period2_baseline[i] = cumulative_period2;
+  }
+  
+  // 6. 47 typhoon scenario simulations with attack rate tracking
+  for (typhoon_idx in 1:47) {
+    real typhoon_change = typhoon_effects[typhoon_idx];
     int typhoon_days = typhoon_days_arr[typhoon_idx];
     int shift = shift_arr[typhoon_idx];
     matrix[T_days_total + 1, 19] states_typhoon;
@@ -535,7 +637,7 @@ generated quantities {
         vector[N_strains] lambda;
         vector[N_strains] new_infections;
         
-        real reduction_factor = ((t_rel > shift) && (t_rel <= shift + typhoon_days)) ? 1.0 - typhoon_reduction : 1.0;
+        real modification_factor = ((t_rel > shift) && (t_rel <= shift + typhoon_days)) ? 1.0 + typhoon_change : 1.0;
         
         for (i in 1:N_strains) {
           int e_idx = 2 + 3*(i-1);
@@ -547,7 +649,7 @@ generated quantities {
         }
         
         for (i in 1:N_strains) {
-          lambda[i] = transmission_rate_forecast[i, t_rel] * reduction_factor * I[i];
+          lambda[i] = transmission_rate_forecast[i, t_rel] * modification_factor * I[i];
           
           real effective_S = S;
           for (j in 1:N_strains) {
@@ -572,7 +674,7 @@ generated quantities {
             }
           }
           S_eff = fmax(0, fmin(1, S_eff));
-          R_eff_daily_scenario[t_rel, i] = R0_forecast[i, t_rel] * reduction_factor * S_eff;
+          R_eff_daily_scenario[t_rel, i] = R0_forecast[i, t_rel] * modification_factor * S_eff;
         }
         
         {
@@ -626,7 +728,7 @@ generated quantities {
         vector[N_strains] lambda;
         vector[N_strains] new_infections;
         
-        real reduction_factor = 1.0 - typhoon_reduction;
+        real modification_factor = 1.0 + typhoon_change;
         
         for (i in 1:N_strains) {
           int e_idx = 2 + 3*(i-1);
@@ -638,7 +740,7 @@ generated quantities {
         }
         
         for (i in 1:N_strains) {
-          lambda[i] = transmission_rate[i, historical_t] * reduction_factor * I[i];
+          lambda[i] = transmission_rate[i, historical_t] * modification_factor * I[i];
           
           real effective_S = S;
           for (j in 1:N_strains) {
@@ -703,7 +805,7 @@ generated quantities {
         vector[N_strains] lambda;
         vector[N_strains] new_infections;
         
-        real reduction_factor = (t_rel <= remaining_days) ? 1.0 - typhoon_reduction : 1.0;
+        real modification_factor = (t_rel <= remaining_days) ? 1.0 + typhoon_change : 1.0;
         
         for (i in 1:N_strains) {
           int e_idx = 2 + 3*(i-1);
@@ -715,7 +817,7 @@ generated quantities {
         }
         
         for (i in 1:N_strains) {
-          lambda[i] = transmission_rate_forecast[i, t_rel] * reduction_factor * I[i];
+          lambda[i] = transmission_rate_forecast[i, t_rel] * modification_factor * I[i];
           
           real effective_S = S;
           for (j in 1:N_strains) {
@@ -740,7 +842,7 @@ generated quantities {
             }
           }
           S_eff = fmax(0, fmin(1, S_eff));
-          R_eff_daily_scenario[t_rel, i] = R0_forecast[i, t_rel] * reduction_factor * S_eff;
+          R_eff_daily_scenario[t_rel, i] = R0_forecast[i, t_rel] * modification_factor * S_eff;
         }
         
         {
@@ -782,6 +884,7 @@ generated quantities {
       }
     }
     
+    // Calculate R_eff for scenarios
     for (w in 1:T_weeks_total) {
       for (i in 1:N_strains) {
         if (w <= T_weeks) {
@@ -806,9 +909,15 @@ generated quantities {
       }
     }
     
+    // Calculate cases, attack rates, and statistics
     for (i in 1:N_strains) {
       real typhoon_total = 0;
       real recovery_total = 0;
+      real cumulative_incidence_scenario = 0;
+      
+      // NEW: Track attack rates for period 1 and period 2
+      real cumulative_period1_scenario = 0;
+      real cumulative_period2_scenario = 0;
       
       for (w in 1:T_weeks_forecast) {
         real weekly_inc = 0;
@@ -834,6 +943,13 @@ generated quantities {
         } else {
           recovery_total += expected_cases;
         }
+        
+        cumulative_incidence_scenario += weekly_inc;
+        
+        // Track for period 2 (forecast weeks)
+        if (w <= period2_weeks_forecast) {
+          cumulative_period2_scenario += weekly_inc;
+        }
       }
       
       cases_typhoon_period[typhoon_idx, i] = typhoon_total;
@@ -845,7 +961,7 @@ generated quantities {
       if (typhoon_idx > 1) {
         real base_typhoon_safe = fmax(cases_baseline_typhoon_period[i], 0.01);
         reduction_typhoon_period[typhoon_idx, i] =
-          fmax(0, fmin(100, (1 - typhoon_total / base_typhoon_safe) * 100));
+          (1 - typhoon_total / base_typhoon_safe) * 100;
       } else {
         reduction_typhoon_period[typhoon_idx, i] = 0;
       }
@@ -853,13 +969,24 @@ generated quantities {
       int n_recovery = T_weeks_forecast - typhoon_weeks;
       avg_weekly_typhoon[typhoon_idx, i] = typhoon_total / typhoon_weeks;
       avg_weekly_recovery[typhoon_idx, i] = recovery_total / n_recovery;
+      
+      // Attack rate for this scenario (original definition)
+      attack_rate_scenarios[typhoon_idx, i] = attack_rate_baseline[i] + cumulative_incidence_scenario;
+      attack_rate_diff[typhoon_idx, i] = attack_rate_scenarios[typhoon_idx, i] - attack_rate_baseline[i];
+      
+      // NEW: Attack rates for specific periods
+      // Period 1: Only historical data (same for all scenarios since typhoon hasn't happened yet)
+      attack_rate_period1_scenarios[typhoon_idx, i] = attack_rate_period1_historical[i];
+      
+      // Period 2: Historical + scenario forecast
+      attack_rate_period2_scenarios[typhoon_idx, i] = attack_rate_period1_historical[i] + cumulative_period2_scenario;
     }
   }
   
-  // 7. NEW: Calculate extended 85 scenarios for Sunburst
+  // 7. Extended 281 scenarios for Sunburst
   {
-    int durations[3] = {3, 5, 7};
-    real intensities[4] = {0.2, 0.4, 0.6, 0.8};
+    int durations[4] = {3, 7, 10, 14};
+    real intensities[10] = {-0.50, -0.30, -0.20, -0.10, -0.05, 0.05, 0.10, 0.20, 0.30, 0.50};
     int shifts[7] = {-7, -5, -3, 0, 3, 5, 7};
     
     // Baseline (idx=1)
@@ -867,15 +994,19 @@ generated quantities {
       cases_extended_typhoon[1, i] = cases_baseline_typhoon_period[i];
       incidence_per10k_extended[1, i] = (cases_baseline_typhoon_period[i] / population) * 10000;
       reduction_extended_typhoon[1, i] = 0.0;
+      
+      // NEW: Attack rates for baseline
+      attack_rate_period1_extended[1, i] = attack_rate_period1_baseline[i];
+      attack_rate_period2_extended[1, i] = attack_rate_period2_baseline[i];
     }
     
-    // All 84 combinations (3 × 4 × 7)
-    for (dur_idx in 1:3) {
-      for (int_idx in 1:4) {
+    // All 280 combinations (4 × 10 × 7)
+    for (dur_idx in 1:4) {
+      for (int_idx in 1:10) {
         for (shift_idx in 1:7) {
-          int scenario_idx = 1 + (dur_idx-1)*28 + (int_idx-1)*7 + shift_idx;
+          int scenario_idx = 1 + (dur_idx-1)*70 + (int_idx-1)*7 + shift_idx;
           int typhoon_days_ext = durations[dur_idx];
-          real typhoon_reduction_ext = intensities[int_idx];
+          real typhoon_change_ext = intensities[int_idx];
           int shift_ext = shifts[shift_idx];
           
           matrix[T_days_total + 1, 19] states_typhoon_ext;
@@ -901,7 +1032,7 @@ generated quantities {
               vector[N_strains] lambda;
               vector[N_strains] new_infections;
               
-              real reduction_factor = ((t_rel > shift_ext) && (t_rel <= shift_ext + typhoon_days_ext)) ? 1.0 - typhoon_reduction_ext : 1.0;
+              real modification_factor = ((t_rel > shift_ext) && (t_rel <= shift_ext + typhoon_days_ext)) ? 1.0 + typhoon_change_ext : 1.0;
               
               for (i in 1:N_strains) {
                 int e_idx = 2 + 3*(i-1);
@@ -913,7 +1044,7 @@ generated quantities {
               }
               
               for (i in 1:N_strains) {
-                lambda[i] = transmission_rate_forecast[i, t_rel] * reduction_factor * I[i];
+                lambda[i] = transmission_rate_forecast[i, t_rel] * modification_factor * I[i];
                 
                 real effective_S = S;
                 for (j in 1:N_strains) {
@@ -966,6 +1097,7 @@ generated quantities {
               }
             }
           } else {
+            // Negative shift (early typhoon)
             int pre_days = -shift_ext;
             int start_historical = T_days - pre_days + 1;
             vector[19] current_state = to_vector(states[start_historical, ]);
@@ -979,7 +1111,7 @@ generated quantities {
               vector[N_strains] lambda;
               vector[N_strains] new_infections;
               
-              real reduction_factor = 1.0 - typhoon_reduction_ext;
+              real modification_factor = 1.0 + typhoon_change_ext;
               
               for (i in 1:N_strains) {
                 int e_idx = 2 + 3*(i-1);
@@ -991,7 +1123,7 @@ generated quantities {
               }
               
               for (i in 1:N_strains) {
-                lambda[i] = transmission_rate[i, historical_t] * reduction_factor * I[i];
+                lambda[i] = transmission_rate[i, historical_t] * modification_factor * I[i];
                 
                 real effective_S = S;
                 for (j in 1:N_strains) {
@@ -1056,7 +1188,7 @@ generated quantities {
               vector[N_strains] lambda;
               vector[N_strains] new_infections;
               
-              real reduction_factor = (t_rel <= remaining_days) ? 1.0 - typhoon_reduction_ext : 1.0;
+              real modification_factor = (t_rel <= remaining_days) ? 1.0 + typhoon_change_ext : 1.0;
               
               for (i in 1:N_strains) {
                 int e_idx = 2 + 3*(i-1);
@@ -1068,7 +1200,7 @@ generated quantities {
               }
               
               for (i in 1:N_strains) {
-                lambda[i] = transmission_rate_forecast[i, t_rel] * reduction_factor * I[i];
+                lambda[i] = transmission_rate_forecast[i, t_rel] * modification_factor * I[i];
                 
                 real effective_S = S;
                 for (j in 1:N_strains) {
@@ -1122,9 +1254,10 @@ generated quantities {
             }
           }
           
-          // Calculate typhoon period cases for this extended scenario
+          // Calculate typhoon period cases and attack rates for this extended scenario
           for (i in 1:N_strains) {
             real typhoon_total_ext = 0;
+            real cumulative_period2_ext = 0;
             
             for (w in 1:typhoon_weeks) {
               real weekly_inc = 0;
@@ -1146,17 +1279,33 @@ generated quantities {
               typhoon_total_ext += expected_cases;
             }
             
+            // Calculate for period 2
+            for (w in 1:period2_weeks_forecast) {
+              real weekly_inc = 0;
+              for (d in 1:7) {
+                int day_idx = (w-1)*7 + d;
+                if (day_idx <= T_days_forecast) {
+                  weekly_inc += daily_incidence_ext[i][day_idx];
+                }
+              }
+              cumulative_period2_ext += weekly_inc;
+            }
+            
             cases_extended_typhoon[scenario_idx, i] = typhoon_total_ext;
             incidence_per10k_extended[scenario_idx, i] = (typhoon_total_ext / population) * 10000;
             
             // Calculate reduction percentage
             real base_cases = cases_extended_typhoon[1, i];
             if (base_cases > 0.01) {
-              reduction_extended_typhoon[scenario_idx, i] = 
-                fmax(0, fmin(100, (1 - typhoon_total_ext / base_cases) * 100));
+              reduction_extended_typhoon[scenario_idx, i] =
+                 (1 - typhoon_total_ext / base_cases) * 100;
             } else {
               reduction_extended_typhoon[scenario_idx, i] = 0.0;
             }
+            
+            // NEW: Attack rates for extended scenarios
+            attack_rate_period1_extended[scenario_idx, i] = attack_rate_period1_historical[i];
+            attack_rate_period2_extended[scenario_idx, i] = attack_rate_period1_historical[i] + cumulative_period2_ext;
           }
         }
       }
