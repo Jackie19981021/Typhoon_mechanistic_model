@@ -32,10 +32,10 @@ data {
   real<lower=0> population;
   int<lower=0> typhoon_weeks;
   
-  // NEW: Week indices for attack rate periods
-  int<lower=1,upper=T_weeks> period1_start_week;
-  int<lower=1,upper=T_weeks> period1_end_week;
-  int<lower=1> period2_weeks_forecast;
+  // NEW: Week indices for attack rate periods (now can extend into forecast)
+  int<lower=1> period1_start_week;           // Can be in historical period
+  int<lower=1> period1_end_week;             // Can be in historical OR forecast period
+  int<lower=0> period2_additional_weeks;     // Additional weeks beyond period1_end_week
 }
 
 transformed data {
@@ -322,16 +322,11 @@ generated quantities {
   real attack_rate_scenarios[47, N_strains];
   real attack_rate_diff[47, N_strains];
   
-  // NEW: Attack rates for specific time periods
-  // Period 1: period1_start_week to period1_end_week (e.g., 2025-07-12 to 2025-09-27)
-  // Period 2: period1_start_week to period1_end_week + period2_weeks_forecast (e.g., 2025-07-12 to 2025-10-18)
-  
-  real attack_rate_period1_historical[N_strains];
+  // NEW: Attack rates for specific time periods (can extend into forecast)
   real attack_rate_period1_baseline[N_strains];
   real attack_rate_period1_scenarios[47, N_strains];
   real attack_rate_period1_extended[281, N_strains];
   
-  real attack_rate_period2_historical[N_strains];
   real attack_rate_period2_baseline[N_strains];
   real attack_rate_period2_scenarios[47, N_strains];
   real attack_rate_period2_extended[281, N_strains];
@@ -361,21 +356,6 @@ generated quantities {
       typhoon_days_arr[idx] = 7;
       shift_arr[idx] = shifts_nonzero[shift_idx];
     }
-  }
-  
-  // Calculate historical attack rates for both periods
-  for (i in 1:N_strains) {
-    real cumulative_period1 = 0;
-    real cumulative_period2 = 0;
-    
-    // Period 1: from period1_start_week to period1_end_week
-    for (w in period1_start_week:period1_end_week) {
-      cumulative_period1 += weekly_incidence[i][w];
-    }
-    attack_rate_period1_historical[i] = cumulative_period1;
-    
-    // Period 2: from period1_start_week to period1_end_week (same as period 1 for historical)
-    attack_rate_period2_historical[i] = cumulative_period1;
   }
   
   // 1. Calculate historical R_eff
@@ -587,23 +567,42 @@ generated quantities {
     }
   }
   
-  // Calculate baseline attack rates for both new periods
+  // ========================================================================
+  // NEW: Calculate baseline attack rates for Period 1 and Period 2
+  // Now periods can extend into forecast
+  // ========================================================================
   for (i in 1:N_strains) {
     real cumulative_period1 = 0;
     real cumulative_period2 = 0;
     
-    // Period 1: only historical data (period1_start_week to period1_end_week)
+    // Period 1: from period1_start_week to period1_end_week
     for (w in period1_start_week:period1_end_week) {
-      cumulative_period1 += weekly_incidence[i][w];
+      if (w <= T_weeks) {
+        // Historical data
+        cumulative_period1 += weekly_incidence[i][w];
+      } else {
+        // Forecast data
+        int w_forecast = w - T_weeks;
+        if (w_forecast <= T_weeks_forecast) {
+          cumulative_period1 += weekly_incidence_forecast[i][w_forecast];
+        }
+      }
     }
     attack_rate_period1_baseline[i] = cumulative_period1;
     
-    // Period 2: historical + forecast weeks
-    for (w in period1_start_week:period1_end_week) {
-      cumulative_period2 += weekly_incidence[i][w];
-    }
-    for (w_forecast in 1:period2_weeks_forecast) {
-      cumulative_period2 += weekly_incidence_forecast[i][w_forecast];
+    // Period 2: Period 1 + additional weeks
+    cumulative_period2 = cumulative_period1;
+    int period2_end_week = period1_end_week + period2_additional_weeks;
+    
+    for (w in (period1_end_week + 1):period2_end_week) {
+      if (w <= T_weeks) {
+        cumulative_period2 += weekly_incidence[i][w];
+      } else {
+        int w_forecast = w - T_weeks;
+        if (w_forecast <= T_weeks_forecast) {
+          cumulative_period2 += weekly_incidence_forecast[i][w_forecast];
+        }
+      }
     }
     attack_rate_period2_baseline[i] = cumulative_period2;
   }
@@ -945,11 +944,6 @@ generated quantities {
         }
         
         cumulative_incidence_scenario += weekly_inc;
-        
-        // Track for period 2 (forecast weeks)
-        if (w <= period2_weeks_forecast) {
-          cumulative_period2_scenario += weekly_inc;
-        }
       }
       
       cases_typhoon_period[typhoon_idx, i] = typhoon_total;
@@ -974,12 +968,54 @@ generated quantities {
       attack_rate_scenarios[typhoon_idx, i] = attack_rate_baseline[i] + cumulative_incidence_scenario;
       attack_rate_diff[typhoon_idx, i] = attack_rate_scenarios[typhoon_idx, i] - attack_rate_baseline[i];
       
-      // NEW: Attack rates for specific periods
-      // Period 1: Only historical data (same for all scenarios since typhoon hasn't happened yet)
-      attack_rate_period1_scenarios[typhoon_idx, i] = attack_rate_period1_historical[i];
+      // ========================================================================
+      // NEW: Calculate attack rates for Period 1 and Period 2 for this scenario
+      // ========================================================================
       
-      // Period 2: Historical + scenario forecast
-      attack_rate_period2_scenarios[typhoon_idx, i] = attack_rate_period1_historical[i] + cumulative_period2_scenario;
+      // Period 1
+      for (w in period1_start_week:period1_end_week) {
+        if (w <= T_weeks) {
+          // Historical data (same for all scenarios)
+          cumulative_period1_scenario += weekly_incidence[i][w];
+        } else {
+          // Forecast data (scenario-specific)
+          int w_forecast = w - T_weeks;
+          if (w_forecast <= T_weeks_forecast) {
+            real weekly_inc_forecast = 0;
+            for (d in 1:7) {
+              int day_idx = (w_forecast-1)*7 + d;
+              if (day_idx <= T_days_forecast) {
+                weekly_inc_forecast += daily_incidence_typhoon[i][day_idx];
+              }
+            }
+            cumulative_period1_scenario += weekly_inc_forecast;
+          }
+        }
+      }
+      attack_rate_period1_scenarios[typhoon_idx, i] = cumulative_period1_scenario;
+      
+      // Period 2: Period 1 + additional weeks
+      cumulative_period2_scenario = cumulative_period1_scenario;
+      int period2_end_week = period1_end_week + period2_additional_weeks;
+      
+      for (w in (period1_end_week + 1):period2_end_week) {
+        if (w <= T_weeks) {
+          cumulative_period2_scenario += weekly_incidence[i][w];
+        } else {
+          int w_forecast = w - T_weeks;
+          if (w_forecast <= T_weeks_forecast) {
+            real weekly_inc_forecast = 0;
+            for (d in 1:7) {
+              int day_idx = (w_forecast-1)*7 + d;
+              if (day_idx <= T_days_forecast) {
+                weekly_inc_forecast += daily_incidence_typhoon[i][day_idx];
+              }
+            }
+            cumulative_period2_scenario += weekly_inc_forecast;
+          }
+        }
+      }
+      attack_rate_period2_scenarios[typhoon_idx, i] = cumulative_period2_scenario;
     }
   }
   
@@ -1000,7 +1036,7 @@ generated quantities {
       attack_rate_period2_extended[1, i] = attack_rate_period2_baseline[i];
     }
     
-    // All 280 combinations (4 × 10 × 7)
+    // All 280 combinations (4 Ã 10 Ã 7)
     for (dur_idx in 1:4) {
       for (int_idx in 1:10) {
         for (shift_idx in 1:7) {
@@ -1257,6 +1293,7 @@ generated quantities {
           // Calculate typhoon period cases and attack rates for this extended scenario
           for (i in 1:N_strains) {
             real typhoon_total_ext = 0;
+            real cumulative_period1_ext = 0;
             real cumulative_period2_ext = 0;
             
             for (w in 1:typhoon_weeks) {
@@ -1279,18 +1316,56 @@ generated quantities {
               typhoon_total_ext += expected_cases;
             }
             
-            // Calculate for period 2
-            for (w in 1:period2_weeks_forecast) {
-              real weekly_inc = 0;
-              for (d in 1:7) {
-                int day_idx = (w-1)*7 + d;
-                if (day_idx <= T_days_forecast) {
-                  weekly_inc += daily_incidence_ext[i][day_idx];
+            // ========================================================================
+            // NEW: Calculate attack rates for Period 1 and Period 2 for extended scenarios
+            // ========================================================================
+            
+            // Period 1
+            for (w in period1_start_week:period1_end_week) {
+              if (w <= T_weeks) {
+                // Historical data (same for all scenarios)
+                cumulative_period1_ext += weekly_incidence[i][w];
+              } else {
+                // Forecast data (scenario-specific)
+                int w_forecast = w - T_weeks;
+                if (w_forecast <= T_weeks_forecast) {
+                  real weekly_inc_forecast = 0;
+                  for (d in 1:7) {
+                    int day_idx = (w_forecast-1)*7 + d;
+                    if (day_idx <= T_days_forecast) {
+                      weekly_inc_forecast += daily_incidence_ext[i][day_idx];
+                    }
+                  }
+                  cumulative_period1_ext += weekly_inc_forecast;
                 }
               }
-              cumulative_period2_ext += weekly_inc;
             }
+            attack_rate_period1_extended[scenario_idx, i] = cumulative_period1_ext;
             
+            // Period 2: Period 1 + additional weeks
+            cumulative_period2_ext = cumulative_period1_ext;
+            int period2_end_week = period1_end_week + period2_additional_weeks;
+            
+            for (w in (period1_end_week + 1):period2_end_week) {
+              if (w <= T_weeks) {
+                cumulative_period2_ext += weekly_incidence[i][w];
+              } else {
+                int w_forecast = w - T_weeks;
+                if (w_forecast <= T_weeks_forecast) {
+                  real weekly_inc_forecast = 0;
+                  for (d in 1:7) {
+                    int day_idx = (w_forecast-1)*7 + d;
+                    if (day_idx <= T_days_forecast) {
+                      weekly_inc_forecast += daily_incidence_ext[i][day_idx];
+                    }
+                  }
+                  cumulative_period2_ext += weekly_inc_forecast;
+                }
+              }
+            }
+            attack_rate_period2_extended[scenario_idx, i] = cumulative_period2_ext;
+            
+            // Original typhoon period calculations
             cases_extended_typhoon[scenario_idx, i] = typhoon_total_ext;
             incidence_per10k_extended[scenario_idx, i] = (typhoon_total_ext / population) * 10000;
             
@@ -1302,13 +1377,9 @@ generated quantities {
             } else {
               reduction_extended_typhoon[scenario_idx, i] = 0.0;
             }
-            
-            // NEW: Attack rates for extended scenarios
-            attack_rate_period1_extended[scenario_idx, i] = attack_rate_period1_historical[i];
-            attack_rate_period2_extended[scenario_idx, i] = attack_rate_period1_historical[i] + cumulative_period2_ext;
           }
         }
       }
     }
   }
-}
+}          

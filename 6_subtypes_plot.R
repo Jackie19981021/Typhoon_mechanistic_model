@@ -16,6 +16,7 @@ library(patchwork)
 options(mc.cores = parallel::detectCores())
 rstan_options(auto_write = TRUE)
 
+
 # ============================================================================
 # DATA LOADING AND PREPROCESSING
 # ============================================================================
@@ -26,7 +27,7 @@ raw_data <- read.csv(data_path)
 raw_data$date <- as.Date(raw_data$date, format = "%Y/%m/%d")
 
 start_date <- as.Date("2023-01-07")
-typhoon_start_date <- as.Date("2025-09-20")
+typhoon_start_date <- as.Date("2025-09-27")
 end_date <- as.Date("2025-11-01")
 
 fitting_data <- raw_data[raw_data$date >= start_date & raw_data$date < typhoon_start_date, ]
@@ -46,35 +47,7 @@ cat("Total validation weeks:", nrow(validation_data), "\n")
 cat("Strains:", paste(strain_names, collapse=", "), "\n\n")
 
 # ============================================================================
-# DEFINE ATTACK RATE PERIODS
-# ============================================================================
-cat("=== Defining Attack Rate Periods ===\n")
-
-# Period 1: 2025-07-12 to 2025-09-27 (before typhoon)
-period1_start_date <- as.Date("2025-07-12")
-period1_end_date <- as.Date("2025-09-27")
-
-# Period 2: 2025-07-12 to 2025-10-18 (including some forecast)
-period2_start_date <- period1_start_date
-period2_end_date <- as.Date("2025-10-18")
-
-# Calculate week indices
-period1_start_week <- which(fitting_data$date == period1_start_date)
-period1_end_week <- nrow(fitting_data)  # This is 2025-09-27
-period2_weeks_forecast <- as.numeric(difftime(period2_end_date, period1_end_date, units = "weeks"))
-
-cat("Period 1 (Before Typhoon):\n")
-cat("  Start:", as.character(period1_start_date), "(week", period1_start_week, ")\n")
-cat("  End:", as.character(period1_end_date), "(week", period1_end_week, ")\n")
-cat("  Duration:", period1_end_week - period1_start_week + 1, "weeks\n\n")
-
-cat("Period 2 (Including Typhoon + Recovery):\n")
-cat("  Start:", as.character(period2_start_date), "(week", period1_start_week, ")\n")
-cat("  End:", as.character(period2_end_date), "\n")
-cat("  Forecast weeks needed:", period2_weeks_forecast, "\n\n")
-
-# ============================================================================
-# STAN DATA PREPARATION
+# FIRST: Define T_weeks and other basic parameters
 # ============================================================================
 T_weeks <- nrow(fitting_data)
 T_weeks_validation <- nrow(validation_data)
@@ -83,6 +56,60 @@ typhoon_weeks <- 1
 N_strains <- 6
 T_weeks_total <- T_weeks + T_weeks_forecast
 
+cat("=== Basic Parameters ===\n")
+cat("T_weeks (historical):", T_weeks, "\n")
+cat("T_weeks_forecast:", T_weeks_forecast, "\n")
+cat("T_weeks_total:", T_weeks_total, "\n")
+cat("typhoon_weeks:", typhoon_weeks, "\n\n")
+
+# ============================================================================
+# NOW: DEFINE ATTACK RATE PERIODS (after T_weeks is defined)
+# ============================================================================
+cat("=== Defining Attack Rate Periods ===\n")
+
+# Period 1: 可以设置为任意时间段（包括预测期）
+period1_start_date <- as.Date("2025-09-20")
+period1_end_date <- as.Date("2025-10-04")  # 现在可以是预测期的日期
+
+# Period 2: Period 1 之后的额外周数
+period2_additional_weeks <- 2  # Period 2 = Period 1 + 2 周
+
+# Calculate week indices
+period1_start_week <- which(fitting_data$date == period1_start_date)
+
+# 关键修改：如果 period1_end_date 在预测期内
+if (period1_end_date <= max(fitting_data$date)) {
+  # Period 1 结束于历史数据内
+  period1_end_week <- which(fitting_data$date == period1_end_date)
+} else {
+  # Period 1 结束于预测期内
+  # 计算从 fitting 数据开始到 period1_end_date 的总周数
+  period1_end_week <- as.numeric(difftime(period1_end_date, min(fitting_data$date), units = "weeks")) + 1
+}
+
+cat("Period 1:\n")
+cat("  Start:", as.character(period1_start_date), "(week", period1_start_week, ")\n")
+cat("  End:", as.character(period1_end_date), "(week", period1_end_week, ")\n")
+
+if (period1_end_week <= T_weeks) {
+  cat("  Status: Entirely within historical data\n")
+} else {
+  cat("  Status: Extends into forecast period\n")
+  cat("  Historical weeks:", T_weeks - period1_start_week + 1, "\n")
+  cat("  Forecast weeks:", period1_end_week - T_weeks, "\n")
+}
+cat("  Duration:", period1_end_week - period1_start_week + 1, "weeks\n\n")
+
+cat("Period 2:\n")
+cat("  Start:", as.character(period1_start_date), "(week", period1_start_week, ")\n")
+period2_end_week <- period1_end_week + period2_additional_weeks
+cat("  End: week", period2_end_week, "\n")
+cat("  Additional weeks beyond Period 1:", period2_additional_weeks, "\n")
+cat("  Total duration:", period2_end_week - period1_start_week + 1, "weeks\n\n")
+
+# ============================================================================
+# STAN DATA PREPARATION
+# ============================================================================
 cases_matrix <- as.matrix(fitting_data[, strain_names])
 cases_matrix[cases_matrix < 0] <- 0
 cases_matrix <- round(cases_matrix)
@@ -101,44 +128,88 @@ stan_data <- list(
   population = 7524000,
   typhoon_weeks = typhoon_weeks,
   
-  # NEW: Attack rate period parameters
+  # NEW: Modified attack rate period parameters
   period1_start_week = period1_start_week,
-  period1_end_week = period1_end_week,
-  period2_weeks_forecast = period2_weeks_forecast
+  period1_end_week = period1_end_week,  # 现在可以 > T_weeks
+  period2_additional_weeks = period2_additional_weeks  # 用相对周数而非绝对周数
 )
 
 cat("Stan data prepared:\n")
+cat("  T_weeks (historical):", stan_data$T_weeks, "\n")
+cat("  T_weeks_forecast:", stan_data$T_weeks_forecast, "\n")
 cat("  period1_start_week:", stan_data$period1_start_week, "\n")
 cat("  period1_end_week:", stan_data$period1_end_week, "\n")
-cat("  period2_weeks_forecast:", stan_data$period2_weeks_forecast, "\n\n")
+cat("  period2_additional_weeks:", stan_data$period2_additional_weeks, "\n")
+
+if (stan_data$period1_end_week > stan_data$T_weeks) {
+  cat("  ⚠ Period 1 extends into forecast by", 
+      stan_data$period1_end_week - stan_data$T_weeks, "weeks\n")
+}
+
+cat("  Period 1 total weeks:", stan_data$period1_end_week - stan_data$period1_start_week + 1, "\n")
+cat("  Period 2 total weeks:", stan_data$period2_additional_weeks + 
+      (stan_data$period1_end_week - stan_data$period1_start_week + 1), "\n\n")
+
+# 验证参数合理性
+if (period1_start_week < 1 || period1_start_week > T_weeks) {
+  stop("ERROR: period1_start_week must be within historical data (1 to ", T_weeks, ")")
+}
+
+if (period1_end_week < period1_start_week) {
+  stop("ERROR: period1_end_week must be >= period1_start_week")
+}
+
+if (period1_end_week > T_weeks_total) {
+  stop("ERROR: period1_end_week (", period1_end_week, 
+       ") exceeds total available weeks (", T_weeks_total, ")")
+}
+
+if (period2_end_week > T_weeks_total) {
+  stop("ERROR: period2_end_week (", period2_end_week, 
+       ") exceeds total available weeks (", T_weeks_total, ")")
+}
+
+cat("✓ All attack rate period parameters validated\n\n")
 
 # ============================================================================
 # MODEL COMPILATION AND FITTING
 # ============================================================================
 cat("=== Compiling Stan model ===\n")
-model_file <- "/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/6_subtypes_attack_rate.stan"
+model_file <- "/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/6_subtypes.stan"
 model <- stan_model(model_file)
 
 cat("\n=== Starting MCMC sampling ===\n")
 cat("Note: Computing 47 main scenarios + 281 extended scenarios\n")
-cat("Plus attack rates for two specific time periods\n\n")
+cat("Plus attack rates for two specific time periods (can extend into forecast)\n\n")
 
 # Uncomment to run new fit:
-fit <- sampling(
-  model,
-  data = stan_data,
-  iter = 2000,
-  warmup = 1000,
-  chains = 4,
-  thin = 1,
-  cores = 4,
-  control = list(adapt_delta = 0.95, max_treedepth = 15)
-)
-saveRDS(fit, file = "/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/typhoon_model_fit_attack_rate.rds")
+ fit <- sampling(
+   model,
+   data = stan_data,
+   iter = 200,
+   warmup = 100,
+   chains = 2,
+   thin = 1,
+   cores = 4,
+   control = list(adapt_delta = 0.8, max_treedepth = 15)
+ )
+# 
+# saveRDS(fit, file = "/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/typhoon_model_fit_attack_rate_flexible.rds")
 
 # Or load previous fit:
 # cat("=== LOADING PREVIOUS FIT ===\n")
-# fit <- readRDS("/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/typhoon_model_fit_attack_rate.rds")
+# fit <- readRDS("/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/typhoon_model_fit_attack_rate_flexible.rds")
+
+
+#saveRDS(fit, file = "/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/typhoon_model_fit_attack_rate.rds")
+
+# Or load previous fit:
+# cat("=== LOADING PREVIOUS FIT ===\n")
+#fit <- readRDS("/Users/chenjiaqi/SPH Dropbox/Jackie Chen/rds/typhoon_model_fit_attack_rate.rds")
+
+
+
+
 
 # ============================================================================
 # EXTRACT RESULTS
@@ -165,13 +236,11 @@ attack_rate_baseline <- rstan::extract(fit, pars = "attack_rate_baseline")$attac
 attack_rate_scenarios <- rstan::extract(fit, pars = "attack_rate_scenarios")$attack_rate_scenarios
 attack_rate_diff <- rstan::extract(fit, pars = "attack_rate_diff")$attack_rate_diff
 
-# NEW: Attack rates for specific periods
-attack_rate_period1_historical <- rstan::extract(fit, pars = "attack_rate_period1_historical")$attack_rate_period1_historical
+# NEW: Attack rates for specific periods (CORRECTED - no "historical" variables)
 attack_rate_period1_baseline <- rstan::extract(fit, pars = "attack_rate_period1_baseline")$attack_rate_period1_baseline
 attack_rate_period1_scenarios <- rstan::extract(fit, pars = "attack_rate_period1_scenarios")$attack_rate_period1_scenarios
 attack_rate_period1_extended <- rstan::extract(fit, pars = "attack_rate_period1_extended")$attack_rate_period1_extended
 
-attack_rate_period2_historical <- rstan::extract(fit, pars = "attack_rate_period2_historical")$attack_rate_period2_historical
 attack_rate_period2_baseline <- rstan::extract(fit, pars = "attack_rate_period2_baseline")$attack_rate_period2_baseline
 attack_rate_period2_scenarios <- rstan::extract(fit, pars = "attack_rate_period2_scenarios")$attack_rate_period2_scenarios
 attack_rate_period2_extended <- rstan::extract(fit, pars = "attack_rate_period2_extended")$attack_rate_period2_extended
@@ -189,12 +258,36 @@ cat("reduction_extended dimensions:", dim(reduction_extended), "\n")
 cat("attack_rate_baseline dimensions:", dim(attack_rate_baseline), "\n")
 cat("attack_rate_scenarios dimensions:", dim(attack_rate_scenarios), "\n")
 cat("attack_rate_diff dimensions:", dim(attack_rate_diff), "\n")
-cat("attack_rate_period1_historical dimensions:", dim(attack_rate_period1_historical), "\n")
+
+# NEW: Verify attack rate period dimensions
+cat("\n=== Attack Rate Period Dimensions ===\n")
+cat("attack_rate_period1_baseline dimensions:", dim(attack_rate_period1_baseline), "\n")
 cat("attack_rate_period1_scenarios dimensions:", dim(attack_rate_period1_scenarios), "\n")
 cat("attack_rate_period1_extended dimensions:", dim(attack_rate_period1_extended), "\n")
-cat("attack_rate_period2_historical dimensions:", dim(attack_rate_period2_historical), "\n")
+cat("attack_rate_period2_baseline dimensions:", dim(attack_rate_period2_baseline), "\n")
 cat("attack_rate_period2_scenarios dimensions:", dim(attack_rate_period2_scenarios), "\n")
 cat("attack_rate_period2_extended dimensions:", dim(attack_rate_period2_extended), "\n")
+
+# Check if Period 1 extends into forecast
+if (period1_end_week > T_weeks) {
+  cat("\n✓ Period 1 extends into forecast period\n")
+  cat("  Historical component: weeks", period1_start_week, "to", T_weeks, "\n")
+  cat("  Forecast component: weeks", T_weeks + 1, "to", period1_end_week, "\n")
+  cat("  → Attack rates will VARY by scenario in forecast portion\n")
+} else {
+  cat("\n✓ Period 1 entirely within historical data\n")
+  cat("  → Attack rates will be IDENTICAL across scenarios\n")
+}
+
+if (period2_end_week > T_weeks) {
+  cat("\n✓ Period 2 extends into forecast period\n")
+  cat("  → Attack rates will VARY by scenario\n")
+} else {
+  cat("\n✓ Period 2 entirely within historical data\n")
+}
+
+
+
 
 # ============================================================================
 # DEFINE SCENARIO LABELS
@@ -217,11 +310,13 @@ typhoon_scenarios <- c(
   "7d -50% E7", "7d -50% E5", "7d -50% E3",
   "7d -50% D3", "7d -50% D5", "7d -50% D7"
 )
-
 # ============================================================================
 # CALCULATE STATISTICS
 # ============================================================================
 cat("\n=== Calculating statistics ===\n")
+
+
+
 
 pred_mean <- apply(pred_cases, c(2,3), mean)
 pred_median <- apply(pred_cases, c(2,3), median)
@@ -233,28 +328,23 @@ forecast_median <- apply(forecast_cases, c(2,3), median)
 forecast_lower <- apply(forecast_cases, c(2,3), quantile, probs = 0.025)
 forecast_upper <- apply(forecast_cases, c(2,3), quantile, probs = 0.975)
 
-# 47 typhoon scenarios
-forecast_typhoon_mean <- array(NA, dim = c(47, T_weeks_forecast, N_strains))
-forecast_typhoon_lower <- array(NA, dim = c(47, T_weeks_forecast, N_strains))
-forecast_typhoon_upper <- array(NA, dim = c(47, T_weeks_forecast, N_strains))
+# Typhoon forecast summaries (4D: scenarios × weeks × strains)
+forecast_typhoon_mean <- apply(forecast_cases_typhoon, c(2,3,4), mean)
+forecast_typhoon_median <- apply(forecast_cases_typhoon, c(2,3,4), median)
+forecast_typhoon_lower <- apply(forecast_cases_typhoon, c(2,3,4), quantile, probs = 0.025)
+forecast_typhoon_upper <- apply(forecast_cases_typhoon, c(2,3,4), quantile, probs = 0.975)
+# R_eff scenarios summaries (4D: scenarios × weeks × strains)
+R_eff_scenarios_mean <- apply(R_eff_scenarios, c(2,3,4), mean)
+R_eff_scenarios_lower <- apply(R_eff_scenarios, c(2,3,4), quantile, probs = 0.025)
+R_eff_scenarios_upper <- apply(R_eff_scenarios, c(2,3,4), quantile, probs = 0.975)
 
-for (typhoon_idx in 1:47) {
-  forecast_typhoon_mean[typhoon_idx,,] <- apply(forecast_cases_typhoon[,typhoon_idx,,], c(2,3), mean)
-  forecast_typhoon_lower[typhoon_idx,,] <- apply(forecast_cases_typhoon[,typhoon_idx,,], c(2,3), quantile, probs = 0.025)
-  forecast_typhoon_upper[typhoon_idx,,] <- apply(forecast_cases_typhoon[,typhoon_idx,,], c(2,3), quantile, probs = 0.975)
-}
 
-R_eff_scenarios_mean <- array(NA, dim = c(47, T_weeks + T_weeks_forecast, N_strains))
-R_eff_scenarios_lower <- array(NA, dim = c(47, T_weeks + T_weeks_forecast, N_strains))
-R_eff_scenarios_upper <- array(NA, dim = c(47, T_weeks + T_weeks_forecast, N_strains))
 
-for (typhoon_idx in 1:47) {
-  R_eff_scenarios_mean[typhoon_idx,,] <- apply(R_eff_scenarios[,typhoon_idx,,], c(2,3), mean)
-  R_eff_scenarios_lower[typhoon_idx,,] <- apply(R_eff_scenarios[,typhoon_idx,,], c(2,3), quantile, probs = 0.025)
-  R_eff_scenarios_upper[typhoon_idx,,] <- apply(R_eff_scenarios[,typhoon_idx,,], c(2,3), quantile, probs = 0.975)
-}
 
-# Original attack rate statistics
+
+
+
+# Original attack rates (up to T_weeks - 2)
 attack_rate_baseline_mean <- apply(attack_rate_baseline, 2, mean)
 attack_rate_baseline_lower <- apply(attack_rate_baseline, 2, quantile, probs = 0.025)
 attack_rate_baseline_upper <- apply(attack_rate_baseline, 2, quantile, probs = 0.975)
@@ -263,22 +353,76 @@ attack_rate_scenarios_mean <- apply(attack_rate_scenarios, c(2,3), mean)
 attack_rate_scenarios_lower <- apply(attack_rate_scenarios, c(2,3), quantile, probs = 0.025)
 attack_rate_scenarios_upper <- apply(attack_rate_scenarios, c(2,3), quantile, probs = 0.975)
 
+# Original attack rate differences (up to T_weeks - 2)
 attack_rate_diff_mean <- apply(attack_rate_diff, c(2,3), mean)
 attack_rate_diff_lower <- apply(attack_rate_diff, c(2,3), quantile, probs = 0.025)
 attack_rate_diff_upper <- apply(attack_rate_diff, c(2,3), quantile, probs = 0.975)
 
+
 # NEW: Attack rate statistics for periods
 # Period 1
-attack_rate_period1_historical_mean <- apply(attack_rate_period1_historical, 2, mean)
 attack_rate_period1_baseline_mean <- apply(attack_rate_period1_baseline, 2, mean)
+attack_rate_period1_baseline_lower <- apply(attack_rate_period1_baseline, 2, quantile, probs = 0.025)
+attack_rate_period1_baseline_upper <- apply(attack_rate_period1_baseline, 2, quantile, probs = 0.975)
+
 attack_rate_period1_scenarios_mean <- apply(attack_rate_period1_scenarios, c(2,3), mean)
+attack_rate_period1_scenarios_lower <- apply(attack_rate_period1_scenarios, c(2,3), quantile, probs = 0.025)
+attack_rate_period1_scenarios_upper <- apply(attack_rate_period1_scenarios, c(2,3), quantile, probs = 0.975)
+
 attack_rate_period1_extended_mean <- apply(attack_rate_period1_extended, c(2,3), mean)
+attack_rate_period1_extended_lower <- apply(attack_rate_period1_extended, c(2,3), quantile, probs = 0.025)
+attack_rate_period1_extended_upper <- apply(attack_rate_period1_extended, c(2,3), quantile, probs = 0.975)
 
 # Period 2
-attack_rate_period2_historical_mean <- apply(attack_rate_period2_historical, 2, mean)
 attack_rate_period2_baseline_mean <- apply(attack_rate_period2_baseline, 2, mean)
+attack_rate_period2_baseline_lower <- apply(attack_rate_period2_baseline, 2, quantile, probs = 0.025)
+attack_rate_period2_baseline_upper <- apply(attack_rate_period2_baseline, 2, quantile, probs = 0.975)
+
 attack_rate_period2_scenarios_mean <- apply(attack_rate_period2_scenarios, c(2,3), mean)
+attack_rate_period2_scenarios_lower <- apply(attack_rate_period2_scenarios, c(2,3), quantile, probs = 0.025)
+attack_rate_period2_scenarios_upper <- apply(attack_rate_period2_scenarios, c(2,3), quantile, probs = 0.975)
+
 attack_rate_period2_extended_mean <- apply(attack_rate_period2_extended, c(2,3), mean)
+attack_rate_period2_extended_lower <- apply(attack_rate_period2_extended, c(2,3), quantile, probs = 0.025)
+attack_rate_period2_extended_upper <- apply(attack_rate_period2_extended, c(2,3), quantile, probs = 0.975)
+
+cat("Attack rate statistics calculated successfully\n\n")
+
+# ============================================================================
+# CALCULATE STATISTICS
+# ============================================================================
+cat("\n=== Calculating statistics ===\n")
+
+# ... 原有的统计代码 ...
+
+# NEW: Attack rate statistics for periods
+# Period 1
+attack_rate_period1_baseline_mean <- apply(attack_rate_period1_baseline, 2, mean)
+attack_rate_period1_baseline_lower <- apply(attack_rate_period1_baseline, 2, quantile, probs = 0.025)
+attack_rate_period1_baseline_upper <- apply(attack_rate_period1_baseline, 2, quantile, probs = 0.975)
+
+attack_rate_period1_scenarios_mean <- apply(attack_rate_period1_scenarios, c(2,3), mean)
+attack_rate_period1_scenarios_lower <- apply(attack_rate_period1_scenarios, c(2,3), quantile, probs = 0.025)
+attack_rate_period1_scenarios_upper <- apply(attack_rate_period1_scenarios, c(2,3), quantile, probs = 0.975)
+
+attack_rate_period1_extended_mean <- apply(attack_rate_period1_extended, c(2,3), mean)
+attack_rate_period1_extended_lower <- apply(attack_rate_period1_extended, c(2,3), quantile, probs = 0.025)
+attack_rate_period1_extended_upper <- apply(attack_rate_period1_extended, c(2,3), quantile, probs = 0.975)
+
+# Period 2
+attack_rate_period2_baseline_mean <- apply(attack_rate_period2_baseline, 2, mean)
+attack_rate_period2_baseline_lower <- apply(attack_rate_period2_baseline, 2, quantile, probs = 0.025)
+attack_rate_period2_baseline_upper <- apply(attack_rate_period2_baseline, 2, quantile, probs = 0.975)
+
+attack_rate_period2_scenarios_mean <- apply(attack_rate_period2_scenarios, c(2,3), mean)
+attack_rate_period2_scenarios_lower <- apply(attack_rate_period2_scenarios, c(2,3), quantile, probs = 0.025)
+attack_rate_period2_scenarios_upper <- apply(attack_rate_period2_scenarios, c(2,3), quantile, probs = 0.975)
+
+attack_rate_period2_extended_mean <- apply(attack_rate_period2_extended, c(2,3), mean)
+attack_rate_period2_extended_lower <- apply(attack_rate_period2_extended, c(2,3), quantile, probs = 0.025)
+attack_rate_period2_extended_upper <- apply(attack_rate_period2_extended, c(2,3), quantile, probs = 0.975)
+
+cat("Attack rate statistics calculated successfully\n\n")
 
 # Extended scenarios mean
 incidence_per10k_mean <- apply(incidence_per10k_extended, c(2,3), mean)
@@ -351,7 +495,7 @@ for (typhoon_idx in 1:47) {
       date = forecast_dates,
       strain = strain_names[strain_idx],
       observed = NA,
-      predicted = forecast_typhoon_mean[typhoon_idx, , strain_idx],
+      predicted = forecast_typhoon_median[typhoon_idx, , strain_idx],  # Use median here
       pred_mean = forecast_typhoon_mean[typhoon_idx, , strain_idx],
       pred_lower = forecast_typhoon_lower[typhoon_idx, , strain_idx],
       pred_upper = forecast_typhoon_upper[typhoon_idx, , strain_idx],
@@ -1075,11 +1219,23 @@ cat("Figure 7 complete\n\n")
 # FIGURES 8-9: R_eff by Scenario and Changes (all durations)
 # ============================================================================
 # ============================================================================
+# ============================================================================
+# 统一的起始周：从历史数据最后3周开始
+reff_start_week <- T_weeks - 8
+
+cat("R_eff visualization start week:", reff_start_week, "\n")
+cat("R_eff visualization start date:", as.character(all_dates[reff_start_week]), "\n")
+cat("Historical data ends at week:", T_weeks, "\n")
+cat("Historical data end date:", as.character(all_dates[T_weeks]), "\n")
+cat("Total weeks to display:", T_weeks_total - reff_start_week + 1, "\n")
+cat("Date range:", as.character(all_dates[reff_start_week]), "to", 
+    as.character(all_dates[T_weeks_total]), "\n\n")
+
+# ============================================================================
 # FIGURE 8: Effective Reproduction Number (Rt) by Scenario (Recent Period)
 # ============================================================================
 cat("\n=== Creating Figure 8: R_eff by Scenario (Recent Period) - Separate for each duration ===\n")
 
-reff_start_week <- T_weeks - 3
 reff_scenarios_list <- list()
 
 for (typhoon_idx in 1:47) {
@@ -1103,7 +1259,44 @@ reff_scenarios_df <- do.call(rbind, reff_scenarios_list)
 reff_scenarios_df$strain <- factor(reff_scenarios_df$strain, levels = strain_names)
 reff_scenarios_df$scenario <- factor(reff_scenarios_df$scenario, levels = typhoon_scenarios)
 
-# Function to create reff plot for selected scenarios
+# 分析每个病原体的 R_eff 范围（用于自适应 Y 轴）
+weeks_subset <- reff_start_week:T_weeks_total
+
+cat("\n=== Analyzing R_eff ranges for adaptive Y-axis ===\n")
+strain_reff_ranges <- data.frame(
+  strain = strain_names,
+  min_val = numeric(N_strains),
+  max_val = numeric(N_strains),
+  suggested_ymin = numeric(N_strains),
+  suggested_ymax = numeric(N_strains)
+)
+
+for (i in 1:N_strains) {
+  # 提取所有 scenarios 在此时期的 R_eff
+  all_scenarios_reff <- R_eff_scenarios_mean[, weeks_subset, i]
+  
+  min_reff <- min(all_scenarios_reff)
+  max_reff <- max(all_scenarios_reff)
+  
+  # 计算合适的 Y 轴范围（留出 10% 的边距）
+  range_span <- max_reff - min_reff
+  margin <- range_span * 0.1
+  
+  suggested_ymin <- max(0, floor((min_reff - margin) * 10) / 10)
+  suggested_ymax <- ceiling((max_reff + margin) * 10) / 10
+  
+  strain_reff_ranges[i, "min_val"] <- min_reff
+  strain_reff_ranges[i, "max_val"] <- max_reff
+  strain_reff_ranges[i, "suggested_ymin"] <- suggested_ymin
+  strain_reff_ranges[i, "suggested_ymax"] <- suggested_ymax
+  
+  cat(sprintf("%s: R_eff range [%.2f, %.2f] → Y-axis [%.1f, %.1f]\n",
+              strain_names[i], min_reff, max_reff, suggested_ymin, suggested_ymax))
+}
+
+cat("\n")
+
+# Function to create reff plot for selected scenarios (with adaptive Y-axis)
 create_reff_plot <- function(selected_scenarios, plot_title, colors, linetypes) {
   df_filtered <- reff_scenarios_df %>% filter(scenario %in% selected_scenarios)
   df_filtered$scenario <- factor(df_filtered$scenario, levels = selected_scenarios)
@@ -1131,11 +1324,19 @@ create_reff_plot <- function(selected_scenarios, plot_title, colors, linetypes) 
     scale_fill_manual(name = "Scenarios:", values = colors) +
     scale_linetype_manual(name = "Scenarios:", values = linetypes) +
     scale_x_date(date_labels = "%m-%d", date_breaks = "1 week") +
-    scale_y_continuous(breaks = seq(0, 10, 1)) +
-    coord_cartesian(ylim = c(0, 5)) +
+    scale_y_continuous(
+      breaks = function(limits) {
+        # 自动生成刻度，确保包含 R=1
+        auto_breaks <- pretty(limits, n = 5)
+        if (!any(auto_breaks == 1) && 1 >= limits[1] && 1 <= limits[2]) {
+          auto_breaks <- sort(c(auto_breaks, 1))
+        }
+        return(auto_breaks)
+      }
+    ) +
     labs(
       title = plot_title,
-      subtitle = "Comparing R_eff trajectories under different transmission modification scenarios\nPink: Typhoon | Green: Recovery",
+      subtitle = "Comparing R_eff trajectories under different transmission modification scenarios\nY-axis adapted to each strain's range | Red line: R_eff=1 | Pink: Typhoon | Green: Recovery",
       x = NULL,
       y = "R_eff"
     ) +
@@ -1210,14 +1411,17 @@ p8_shifted <- create_reff_plot(selected_shifted_reff,
                                "Effective Reproduction Number (R_eff) by Typhoon Scenario - Shifted Timing Scenarios", 
                                colors_shifted, linetypes_shifted)
 print(p8_shifted)
-ggsave("figure8_reff_scenarios_shifted.png", p8_shifted, width = 14, height = 10, dpi = 300, bg = "white")
+cat("\n=== Figure 8 series with adaptive Y-axis complete ===\n")
+cat("✓ Each strain now has Y-axis optimized for its actual R_eff range\n")
+cat("✓ Changes are more visible while maintaining R=1 reference line\n")
+cat("✓ Saved as: figure8_reff_scenarios_*_adaptive.png\n\n")
 
 # ============================================================================
 # FIGURE 9: Change in R_eff from Baseline - Separate for each duration
 # ============================================================================
 cat("\n=== Creating Figure 9: Change in R_eff from Baseline ===\n")
 
-reff_change_start_week <- T_weeks - 4
+reff_change_start_week <- T_weeks - 1
 reff_change_list <- list()
 
 for (typhoon_idx in 2:47) {
@@ -1618,7 +1822,7 @@ for (strain_idx in 1:N_strains) {
   ))
   
   # All 47 scenarios
-  for (typhoon_idx in 1:47) {
+  for (typhoon_idx in 2:47) {  # Skip baseline (index 1)
     attack_rate_df <- rbind(attack_rate_df, data.frame(
       scenario = typhoon_scenarios[typhoon_idx],
       strain = strain_names[strain_idx],
@@ -1800,16 +2004,71 @@ write.csv(attack_rate_table,
 
 cat("Attack rate summary table saved to: attack_rate_summary.csv\n")
 
-# Print summary statistics
-cat("\n=== Attack Rate Summary Statistics ===\n")
-cat("Baseline attack rates (up to T_weeks - 2):\n")
-for (i in 1:N_strains) {
-  cat(sprintf("%s: %.6f [%.6f, %.6f]\n", 
-              strain_names[i],
-              attack_rate_baseline_mean[i],
-              attack_rate_baseline_lower[i],
-              attack_rate_baseline_upper[i]))
+# ============================================================================
+# PRINT SUMMARY STATISTICS
+# ============================================================================
+cat("\n", rep("=", 100), "\n", sep="")
+cat("ATTACK RATE SUMMARY STATISTICS\n")
+cat(rep("=", 100), "\n", sep="")
+
+cat("\nPeriod 1 (", as.character(period1_start_date), " to ", 
+    as.character(period1_end_date), "):\n", sep="")
+if (period1_end_week <= T_weeks) {
+  cat("Status: Entirely within historical data (weeks ", period1_start_week, " to ", period1_end_week, ")\n", sep="")
+  cat("Note: All scenarios show IDENTICAL values (no typhoon effect yet)\n\n")
+} else {
+  cat("Status: Extends into forecast period\n")
+  cat("  Historical: weeks ", period1_start_week, " to ", T_weeks, "\n", sep="")
+  cat("  Forecast: weeks ", T_weeks + 1, " to ", period1_end_week, "\n", sep="")
+  cat("Note: Scenarios DIFFER in forecast portion\n\n")
 }
+
+cat("Baseline Attack Rates (Period 1):\n")
+for (i in 1:N_strains) {
+  cat(sprintf("%s: %.6f (%.3f per 10K) [%.3f, %.3f]\n",
+              strain_names[i],
+              attack_rate_period1_baseline_mean[i],
+              attack_rate_period1_baseline_mean[i] * 10000,
+              attack_rate_period1_baseline_lower[i] * 10000,
+              attack_rate_period1_baseline_upper[i] * 10000))
+}
+
+cat("\nPeriod 2 (", as.character(period1_start_date), " to week ", 
+    period1_end_week + period2_additional_weeks, "):\n", sep="")
+cat("Status: Period 1 + ", period2_additional_weeks, " additional weeks\n", sep="")
+cat("Total weeks: ", period1_end_week + period2_additional_weeks - period1_start_week + 1, "\n\n", sep="")
+
+cat("Baseline Attack Rates (Period 2):\n")
+for (i in 1:N_strains) {
+  cat(sprintf("%s: %.6f (%.3f per 10K) [%.3f, %.3f]\n",
+              strain_names[i],
+              attack_rate_period2_baseline_mean[i],
+              attack_rate_period2_baseline_mean[i] * 10000,
+              attack_rate_period2_baseline_lower[i] * 10000,
+              attack_rate_period2_baseline_upper[i] * 10000))
+}
+
+# Show comparison between baseline and selected scenarios
+cat("\nPeriod 2 - Scenario Comparisons (vs Baseline):\n")
+scenario_indices_to_show <- c(1, 12, 21)  # Baseline, 7d -50%, 7d +50%
+scenario_names_to_show <- c("Baseline", "7d -50%", "7d +50%")
+
+for (sc_idx in 1:length(scenario_indices_to_show)) {
+  cat(sprintf("\n%s:\n", scenario_names_to_show[sc_idx]))
+  for (i in 1:N_strains) {
+    ar_val <- attack_rate_period2_scenarios_mean[scenario_indices_to_show[sc_idx], i]
+    diff_from_baseline <- (ar_val - attack_rate_period2_baseline_mean[i]) * 10000
+    pct_change <- (ar_val / attack_rate_period2_baseline_mean[i] - 1) * 100
+    
+    cat(sprintf("  %s: %.3f per 10K (Δ = %+.3f, %+.1f%%)\n",
+                strain_names[i],
+                ar_val * 10000,
+                diff_from_baseline,
+                pct_change))
+  }
+}
+
+cat("\n", rep("=", 100), "\n", sep="")
 
 # ============================================================================
 # Extract and Print Key Parameters
@@ -2649,7 +2908,7 @@ cat("\n=== Creating Attack Rate Summary Tables ===\n")
 period1_summary <- data.frame(
   Strain = rep(strain_names, each = 281),
   Scenario_Index = rep(1:281, times = 6),
-  Attack_Rate_Historical = as.vector(t(replicate(281, attack_rate_period1_historical_mean))),
+  Attack_Rate_Historical = as.vector(t(replicate(281, attack_rate_period1_baseline_mean))),
   Attack_Rate_Per_10K = as.vector(t(attack_rate_period1_per10k)),
   stringsAsFactors = FALSE
 )
@@ -2688,7 +2947,6 @@ write.csv(period1_summary,
 period2_summary <- data.frame(
   Strain = rep(strain_names, each = 281),
   Scenario_Index = rep(1:281, times = 6),
-  Attack_Rate_Historical = as.vector(t(replicate(281, attack_rate_period2_historical_mean))),
   Attack_Rate_Baseline = as.vector(t(replicate(281, attack_rate_period2_baseline_mean))),
   Attack_Rate_Per_10K = as.vector(t(attack_rate_period2_per10k)),
   stringsAsFactors = FALSE
@@ -2698,7 +2956,7 @@ period2_summary$Scenario <- sapply(period2_summary$Scenario_Index, get_scenario_
 
 # Calculate difference from baseline
 period2_summary$Diff_From_Baseline <- period2_summary$Attack_Rate_Per_10K - 
-  period2_summary$Attack_Rate_Baseline * 10000
+  (period2_summary$Attack_Rate_Baseline * 10000)
 
 write.csv(period2_summary, 
           file = "/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/attack_rate_period2_summary.csv",
@@ -2715,16 +2973,16 @@ cat("\n", rep("=", 100), "\n", sep="")
 cat("ATTACK RATE SUMMARY STATISTICS\n")
 cat(rep("=", 100), "\n", sep="")
 
-cat("\nPeriod 1 (2025-07-12 to 2025-09-27, Before Typhoon):\n")
+cat("\nPeriod 1 (", as.character(period1_start_date), " to ", as.character(period1_end_date), "):\n", sep="")
 cat("All scenarios are identical (historical data only)\n\n")
 for (i in 1:N_strains) {
   cat(sprintf("%s: %.6f (%.3f per 10K)\n", 
               strain_names[i],
-              attack_rate_period1_historical_mean[i],
-              attack_rate_period1_historical_mean[i] * 10000))
+              attack_rate_period1_baseline_mean[i],
+              attack_rate_period1_baseline_mean[i] * 10000))
 }
 
-cat("\nPeriod 2 (2025-07-12 to 2025-10-18, Including Typhoon + Recovery):\n")
+cat("\nPeriod 2 (", as.character(period1_start_date), " to ", as.character(period1_end_date + (period2_additional_weeks * 7)), ", Including Typhoon + Recovery):\n", sep="")
 cat("Baseline Attack Rates:\n")
 for (i in 1:N_strains) {
   cat(sprintf("%s: %.6f (%.3f per 10K)\n", 
@@ -2734,13 +2992,20 @@ for (i in 1:N_strains) {
 }
 
 cat("\nPeriod 2 - Selected Scenario Comparisons:\n")
-# Show a few key scenarios (e.g., 7d -50%, 7d 0%, 7d +50%)
-scenario_indices_to_show <- c(1, 12, 17, 21)  # Baseline, 7d -50%, 7d 0%, 7d +50%
-scenario_names_to_show <- c("Baseline", "7d -50% On-time", "7d 0% On-time", "7d +50% On-time")
+# Show a few key scenarios (e.g., 7d -50%, 7d +5%, 7d +50%)
+scenario_indices_to_show <- c(1, 12, 17, 21)  # Baseline, 7d -50%, 7d +5%, 7d +50%
+scenario_names_to_show <- c("Baseline", "7d -50% On-time", "7d +5% On-time", "7d +50% On-time")
 
 for (sc_idx in 1:length(scenario_indices_to_show)) {
-  scenario_extended_idx <- 1 + (1)*70 + (scenario_indices_to_show[sc_idx] - 12)*7 + 4  # Shift=0
-  if (scenario_indices_to_show[sc_idx] == 1) scenario_extended_idx <- 1
+  if (scenario_indices_to_show[sc_idx] == 1) {
+    scenario_extended_idx <- 1
+  } else if (scenario_indices_to_show[sc_idx] == 12) {
+    scenario_extended_idx <- 75  # 7d -50% On-time
+  } else if (scenario_indices_to_show[sc_idx] == 17) {
+    scenario_extended_idx <- 110  # 7d +5% On-time
+  } else if (scenario_indices_to_show[sc_idx] == 21) {
+    scenario_extended_idx <- 138  # 7d +50% On-time
+  }
   
   cat(sprintf("\n%s:\n", scenario_names_to_show[sc_idx]))
   for (i in 1:N_strains) {
@@ -2769,4 +3034,3 @@ cat("  - attack_rate_period2_summary.csv\n\n")
 
 cat("All visualizations and analyses complete!\n")
 cat(rep("=", 100), "\n\n")
-
