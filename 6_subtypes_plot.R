@@ -2,7 +2,7 @@
 # TYPHOON IMPACT ANALYSIS - WITH ATTACK RATE PERIODS
 # COMPLETE ANALYSIS INCLUDING NEW ATTACK RATE VISUALIZATIONS
 # ============================================================================
-Sys.setenv('R_MAX_VSIZE' = 64 * 1024^3)
+#Sys.setenv('R_MAX_VSIZE' = 64 * 1024^3)
 
 library(rstan)
 library(ggplot2)
@@ -183,29 +183,29 @@ cat("Note: Computing 47 main scenarios + 281 extended scenarios\n")
 cat("Plus attack rates for two specific time periods (can extend into forecast)\n\n")
 
 # Uncomment to run new fit:
- fit <- sampling(
-   model,
-   data = stan_data,
-   iter = 200,
-   warmup = 100,
-   chains = 2,
-   thin = 1,
-   cores = 4,
-   control = list(adapt_delta = 0.8, max_treedepth = 15)
- )
+fit <- sampling(
+  model,
+  data = stan_data,
+  iter = 200,
+  warmup = 100,
+  chains = 2,
+  thin = 1,
+  cores = 4,
+  control = list(adapt_delta = 0.8, max_treedepth = 15)
+)
 # 
 # saveRDS(fit, file = "/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/typhoon_model_fit_attack_rate_flexible.rds")
 
 # Or load previous fit:
 # cat("=== LOADING PREVIOUS FIT ===\n")
-# fit <- readRDS("/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/typhoon_model_fit_attack_rate_flexible.rds")
+fit <- readRDS("/Users/chenjiaqi/SPH Dropbox/Jackie Chen/rds/typhoon_model_fit_attack_rate.rds")
 
 
 #saveRDS(fit, file = "/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/typhoon_model_fit_attack_rate.rds")
 
 # Or load previous fit:
 # cat("=== LOADING PREVIOUS FIT ===\n")
-#fit <- readRDS("/Users/chenjiaqi/SPH Dropbox/Jackie Chen/rds/typhoon_model_fit_attack_rate.rds")
+#fit <- readRDS("/Users/chenjiaqi/Desktop/COVID-19_HK/typhoon/typhoon_model_fit_attack_rate.rds")
 
 
 
@@ -590,216 +590,372 @@ print(p1_fit_forecast)
 ggsave("figure1_typhoon_baseline_forecast_validation.png", p1_fit_forecast,
        width = 14, height = 9, dpi = 300, bg = "white")
 
-# ============================================================================
-# FIGURE 2: Recent Period + Selected Typhoon Scenarios (Multiple Duration Plots)
-# ============================================================================
-cat("\n=== Creating Figure 2: Recent Period + Scenarios ===\n")
 
-cutoff_date <- as.Date("2025-09-01")
-recent_fit_df <- results_df %>%
-  filter(date >= cutoff_date) %>%
+
+
+
+
+# ============================================================================
+# PREPARE DATA FOR FIGURE 2 - ABSOLUTE NUMBERS & UNIFORM "ACTIVITY" LABELS
+# ============================================================================
+
+cat("\n=== Preparing data for Figure 2 (Absolute Numbers, Uniform Activity Labels) ===\n")
+
+# ============================================================================
+# 1. 自定义可视化起点 (主图显示的起点)
+# ============================================================================
+visualization_start_date <- as.Date("2025-07-01") 
+
+cat("Visualization start date:", as.character(visualization_start_date), "\n")
+cat("Typhoon start date:", as.character(typhoon_start_date), "\n")
+
+# ============================================================================
+# 2. 数据准备 (使用绝对数值，不除以人口)
+# ============================================================================
+
+# 筛选指定日期之后的历史拟合数据
+recent_fit <- results_df %>%
+  filter(date >= visualization_start_date) %>%
   mutate(scenario = "Historical Fit")
 
-recent_and_scenarios <- rbind(recent_fit_df, typhoon_forecast_df)
-recent_and_scenarios$scenario <- factor(
-  recent_and_scenarios$scenario,
-  levels = c("Historical Fit", typhoon_scenarios)
+# 添加 baseline forecast
+baseline_with_label <- forecast_baseline %>%
+  mutate(scenario = "0% (Baseline)")
+
+# 合并所有数据 (Historical + Baseline + Typhoon Scenarios)
+recent_and_scenarios <- rbind(
+  recent_fit %>% select(week, date, strain, observed, predicted, pred_mean, pred_lower, pred_upper, scenario),
+  baseline_with_label %>% select(week, date, strain, observed, predicted, pred_mean, pred_lower, pred_upper, scenario),
+  typhoon_forecast_df %>% select(week, date, strain, observed, predicted, pred_mean, pred_lower, pred_upper, scenario)
 )
 
-last_observed <- recent_fit_df %>%
+# 确保 Scenario 因子顺序
+recent_and_scenarios$scenario <- factor(recent_and_scenarios$scenario, 
+                                        levels = c("Historical Fit", typhoon_scenarios))
+
+# 准备最后一个观测点
+last_observed <- results_df %>%
   group_by(strain) %>%
-  slice_tail(n = 1) %>%
+  filter(date == max(date), !is.na(observed)) %>%
   ungroup()
 
-# Function to create scenario plot
-create_scenario_plot <- function(selected_scenarios, plot_title, colors, linetypes) {
+# Validation data (保持原始数值)
+validation_plot_df_abs <- validation_plot_df
+
+# ============================================================================
+# 3. 自定义 Strain 标签 (全部统一为 Activity)
+# ============================================================================
+# 逻辑：直接修改数据中的 Strain 名称，统一后缀为 Activity
+
+# 定义旧名称到新名称的映射 (全部修改为 Activity)
+strain_label_map <- c(
+  "B"     = "Influenza B Activity",
+  "H3"    = "Influenza H3 Activity",
+  "H1"    = "Influenza H1 Activity",
+  "COVID" = "COVID-19 Activity",
+  "RSV"   = "RSV Activity",
+  "HFMD"  = "HFMD Activity"
+)
+
+# 应用映射并保持原本的顺序
+new_strain_levels <- strain_label_map[strain_names] # 保持原本 strain_names 的顺序
+
+# 更新所有相关数据框的 strain 列
+update_strain_labels <- function(df) {
+  df$strain <- as.character(df$strain)
+  df$strain <- strain_label_map[df$strain]
+  df$strain <- factor(df$strain, levels = new_strain_levels)
+  return(df)
+}
+
+recent_and_scenarios <- update_strain_labels(recent_and_scenarios)
+last_observed <- update_strain_labels(last_observed)
+validation_plot_df_abs <- update_strain_labels(validation_plot_df_abs)
+
+# 更新全局 strain_names 变量以供后续循环使用
+new_strain_names_vec <- levels(recent_and_scenarios$strain)
+
+cat("Labels updated uniformly to 'Activity':\n")
+print(new_strain_names_vec)
+
+# ============================================================================
+# 辅助函数与配色 (保持不变)
+# ============================================================================
+# (为了节省空间，此处省略配色和线型定义的代码块，它们与上一个版本完全相同，请确保环境中已定义)
+# 如果需要，请从上一个回答中复制 colors_3d, linetypes_3d 等定义块到这里。
+# ... [此处插入配色和线型定义] ...
+# 3 days scenarios
+selected_3d <- c("Historical Fit", "0% (Baseline)", 
+                 "3d -50%", "3d -30%", "3d -10%", 
+                 "3d +10%", "3d +30%", "3d +50%")
+colors_3d <- c("Historical Fit"="#2E4057", "0% (Baseline)"="#708090",
+               "3d -50%"="#B71C1C", "3d -30%"="#E53935", "3d -10%"="#EF5350",
+               "3d +10%"="#66BB6A", "3d +30%"="#43A047", "3d +50%"="#2E7D32")
+linetypes_3d <- c("Historical Fit"="solid", "0% (Baseline)"="dashed",
+                  "3d -50%"="solid", "3d -30%"="twodash", "3d -10%"="dotted",
+                  "3d +10%"="dotted", "3d +30%"="twodash", "3d +50%"="solid")
+
+# 7 days scenarios
+selected_7d <- c("Historical Fit", "0% (Baseline)", 
+                 "7d -50%", "7d -30%", "7d -10%",
+                 "7d +10%", "7d +30%", "7d +50%")
+colors_7d <- c("Historical Fit"="#2E4057", "0% (Baseline)"="#708090",
+               "7d -50%"="#B71C1C", "7d -30%"="#E53935", "7d -10%"="#EF5350",
+               "7d +10%"="#66BB6A", "7d +30%"="#43A047", "7d +50%"="#2E7D32")
+linetypes_7d <- c("Historical Fit"="solid", "0% (Baseline)"="dashed",
+                  "7d -50%"="solid", "7d -30%"="twodash", "7d -10%"="dotted",
+                  "7d +10%"="dotted", "7d +30%"="twodash", "7d +50%"="solid")
+
+# 10 days scenarios
+selected_10d <- c("Historical Fit", "0% (Baseline)", 
+                  "10d -50%", "10d -30%", "10d -10%",
+                  "10d +10%", "10d +30%", "10d +50%")
+colors_10d <- c("Historical Fit"="#2E4057", "0% (Baseline)"="#708090",
+                "10d -50%"="#B71C1C", "10d -30%"="#E53935", "10d -10%"="#EF5350",
+                "10d +10%"="#66BB6A", "10d +30%"="#43A047", "10d +50%"="#2E7D32")
+linetypes_10d <- c("Historical Fit"="solid", "0% (Baseline)"="dashed",
+                   "10d -50%"="solid", "10d -30%"="twodash", "10d -10%"="dotted",
+                   "10d +10%"="dotted", "10d +30%"="twodash", "10d +50%"="solid")
+
+# 14 days scenarios
+selected_14d <- c("Historical Fit", "0% (Baseline)", 
+                  "14d -50%", "14d -30%", "14d -10%",
+                  "14d +10%", "14d +30%", "14d +50%")
+colors_14d <- c("Historical Fit"="#2E4057", "0% (Baseline)"="#708090",
+                "14d -50%"="#B71C1C", "14d -30%"="#E53935", "14d -10%"="#EF5350",
+                "14d +10%"="#66BB6A", "14d +30%"="#43A047", "14d +50%"="#2E7D32")
+linetypes_14d <- c("Historical Fit"="solid", "0% (Baseline)"="dashed",
+                   "14d -50%"="solid", "14d -30%"="twodash", "14d -10%"="dotted",
+                   "14d +10%"="dotted", "14d +30%"="twodash", "14d +50%"="solid")
+
+# Shifted timing scenarios
+selected_shifted <- c("Historical Fit", "0% (Baseline)", "7d -50%",
+                      "7d -50% E7", "7d -50% E5", "7d -50% E3", 
+                      "7d -50% D3", "7d -50% D5", "7d -50% D7")
+colors_shifted <- c("Historical Fit"="#2E4057", "0% (Baseline)"="#708090", "7d -50%"="#B71C1C",
+                    "7d -50% E7"="#FF6F00", "7d -50% E5"="#FF8F00", "7d -50% E3"="#FFA726",
+                    "7d -50% D3"="#5E35B1", "7d -50% D5"="#7E57C2", "7d -50% D7"="#9575CD")
+linetypes_shifted <- c("Historical Fit"="solid", "0% (Baseline)"="dashed", "7d -50%"="solid",
+                       "7d -50% E7"="longdash", "7d -50% E5"="dotdash", "7d -50% E3"="dotted",
+                       "7d -50% D3"="dotted", "7d -50% D5"="dotdash", "7d -50% D7"="longdash")
+
+# ============================================================================
+# FIGURE 2 GENERATION FUNCTION (Modified Inset Size)
+# ============================================================================
+
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(grid)
+library(gridExtra)
+library(gtable)
+
+create_scenario_plot_with_insets <- function(selected_scenarios, plot_title, colors, linetypes, 
+                                             typhoon_duration_days) {
+  
+  # 筛选数据
   df_filtered <- recent_and_scenarios %>% filter(scenario %in% selected_scenarios)
   df_filtered$scenario <- factor(df_filtered$scenario, levels = selected_scenarios)
   
-  p <- ggplot(df_filtered, aes(x = date)) +
-    annotate("rect",
-             xmin = typhoon_start_date_line,
-             xmax = typhoon_end_date_line,
-             ymin = -Inf, ymax = Inf,
-             fill = "pink", alpha = 0.15) +
-    annotate("rect",
-             xmin = recovery_start_date,
-             xmax = max(forecast_dates),
-             ymin = -Inf, ymax = Inf,
-             fill = "lightgreen", alpha = 0.1) +
-    geom_ribbon(data = filter(df_filtered, scenario == "Historical Fit"),
-                aes(ymin = pred_lower, ymax = pred_upper),
-                alpha = 0.2, fill = "#377EB8") +
-    geom_line(data = filter(df_filtered, scenario == "Historical Fit"),
-              aes(y = predicted), color = "#377EB8", size = 1.4) +
-    geom_point(data = filter(df_filtered, scenario == "Historical Fit", !is.na(observed)),
+  # 动态计算日期
+  typhoon_end_date_dynamic <- typhoon_start_date_line + typhoon_duration_days
+  recovery_start_date_dynamic <- typhoon_end_date_dynamic
+  
+  # ============================================================================
+  # 主图 (Main Plot)
+  # ============================================================================
+  p_main <- ggplot(df_filtered, aes(x = date)) +
+    # 背景区域 (Pink)
+    annotate("rect", xmin = typhoon_start_date_line, xmax = typhoon_end_date_dynamic,
+             ymin = -Inf, ymax = Inf, fill = "pink", alpha = 0.15) +
+    # 背景区域 (Green)
+    annotate("rect", xmin = recovery_start_date_dynamic, xmax = max(forecast_dates),
+             ymin = -Inf, ymax = Inf, fill = "lightgreen", alpha = 0.1) +
+    
+    # 历史拟合线 (Before Typhoon)
+    geom_ribbon(data = filter(df_filtered, scenario == "Historical Fit", date < typhoon_start_date_line),
+                aes(ymin = pred_lower, ymax = pred_upper), alpha = 0.2, fill = "#2E4057") +
+    geom_line(data = filter(df_filtered, scenario == "Historical Fit", date < typhoon_start_date_line),
+              aes(y = predicted), color = "#2E4057", size = 1.4) +
+    
+    # 历史观测点
+    geom_point(data = filter(df_filtered, scenario == "Historical Fit", !is.na(observed), date < typhoon_start_date_line),
                aes(y = observed), color = "black", size = 1.3, alpha = 0.6) +
+    
+    # 最后一个拟合点 (Highlight)
     geom_point(data = last_observed, aes(y = observed),
                color = "black", size = 3, shape = 21, fill = "white", stroke = 1.3) +
-    geom_point(data = validation_plot_df,
-               aes(x = date, y = observed),
+    
+    # 验证集数据
+    geom_point(data = validation_plot_df_abs, aes(x = date, y = observed),
                color = "black", fill = "yellow", shape = 23, size = 2.0, stroke = 1.2) +
-    geom_ribbon(data = filter(df_filtered, scenario != "Historical Fit"),
-                aes(ymin = pred_lower, ymax = pred_upper, fill = scenario),
-                alpha = 0.18) +
-    geom_line(data = filter(df_filtered, scenario != "Historical Fit"),
-              aes(y = predicted, color = scenario, linetype = scenario),
-              size = 1.2) +
-    geom_vline(xintercept = typhoon_start_date_line,
-               linetype = "dashed", color = "gray40", size = 0.8) +
-    geom_vline(xintercept = typhoon_end_date_line,
-               linetype = "dashed", color = "red", size = 0.8) +
+    
+    # 预测情景线 (After Typhoon, no Ribbon in main plot)
+    geom_line(data = filter(df_filtered, scenario != "Historical Fit", date >= max(fitting_data$date)),
+              aes(y = predicted, color = scenario, linetype = scenario), size = 1.3) +
+    
+    # 垂直线
+    geom_vline(xintercept = typhoon_start_date_line, linetype = "dashed", color = "gray40", size = 0.8) +
+    geom_vline(xintercept = typhoon_end_date_dynamic, linetype = "dashed", color = "red", size = 0.8) +
+    
     facet_wrap(~strain, scales = "free_y", ncol = 2, nrow = 3) +
+    
     scale_color_manual(name = "Scenarios:", values = colors) +
-    scale_fill_manual(name = "Scenarios:", values = colors) +
     scale_linetype_manual(name = "Scenarios:", values = linetypes) +
-    scale_x_date(date_labels = "%m-%d", date_breaks = "1 week") +
+    scale_x_date(date_labels = "%b", date_breaks = "1 month") +
+    scale_y_continuous(labels = scales::comma) + 
+    
     labs(
       title = plot_title,
-      subtitle = "Blue: Model fit | Yellow diamonds: Validation data | Colored lines: Forecast scenarios\nGray dashed: Typhoon start | Red dashed: Typhoon end | Pink: Typhoon (1 week) | Green: Recovery (7 weeks)",
+      subtitle = paste0("Typhoon duration: ", typhoon_duration_days, " days",
+                        " | Pre-typhoon: Historical Fit | Post-typhoon: Scenarios\n",
+                        "Insets: Forecasts only (from gray dashed line) | Yellow: Validation Data"),
       x = NULL,
-      y = "Weekly Cases/Hospitalizations"
+      # Y轴标题统一修改为 Activity Count
+      y = "Weekly Activity Count" 
     ) +
     theme_minimal(base_size = 11) +
     theme(
-      panel.grid.major = element_blank(),
+      panel.grid.major = element_line(color = "gray90", size = 0.3),
       panel.grid.minor = element_blank(),
       panel.border = element_rect(color = "gray30", fill = NA, size = 0.5),
-      strip.text = element_text(size = 11, face = "bold"),
+      panel.background = element_rect(fill = "white", color = NA),
+      strip.text = element_text(size = 11, face = "bold"), 
       strip.background = element_rect(fill = "gray95", color = "gray30", size = 0.5),
-      axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
       legend.position = "bottom",
-      legend.direction = "horizontal",
       plot.title = element_text(size = 13, face = "bold"),
       plot.subtitle = element_text(size = 8.5, color = "gray30")
-    ) +
-    guides(
-      color = guide_legend(nrow = 2, byrow = TRUE),
-      fill = guide_legend(nrow = 2, byrow = TRUE),
-      linetype = guide_legend(nrow = 2, byrow = TRUE)
     )
   
-  return(p)
+  # ============================================================================
+  # 嵌入小图 (Inset Plots)
+  # ============================================================================
+  
+  create_inset_for_strain <- function(strain_name, df_filtered) {
+    df_strain <- df_filtered %>% filter(strain == strain_name)
+    validation_strain <- validation_plot_df_abs %>% filter(strain == strain_name)
+    
+    # 仅筛选台风开始后的数据
+    df_strain_inset <- df_strain %>% filter(date >= typhoon_start_date_line)
+    validation_inset <- validation_strain %>% filter(date >= typhoon_start_date_line)
+    
+    p_inset <- ggplot(df_strain_inset, aes(x = date)) +
+      # 背景
+      annotate("rect", xmin = typhoon_start_date_line, xmax = typhoon_end_date_dynamic,
+               ymin = -Inf, ymax = Inf, fill = "pink", alpha = 0.2) +
+      annotate("rect", xmin = recovery_start_date_dynamic, xmax = max(forecast_dates),
+               ymin = -Inf, ymax = Inf, fill = "lightgreen", alpha = 0.15) +
+      
+      # 预测情景 (带 CrI)
+      geom_ribbon(data = filter(df_strain_inset, scenario != "Historical Fit"),
+                  aes(ymin = pred_lower, ymax = pred_upper, fill = scenario), alpha = 0.15) +
+      geom_line(data = filter(df_strain_inset, scenario != "Historical Fit"),
+                aes(y = predicted, color = scenario, linetype = scenario), size = 0.6) +
+      
+      # 验证数据
+      geom_point(data = validation_inset, aes(x = date, y = observed),
+                 color = "black", fill = "yellow", shape = 23, size = 0.8) +
+      
+      # 垂直线 (仅台风结束线)
+      geom_vline(xintercept = typhoon_end_date_dynamic, linetype = "dashed", color = "red", size = 0.3) +
+      
+      scale_color_manual(values = colors) +
+      scale_fill_manual(values = colors) +
+      scale_linetype_manual(values = linetypes) +
+      
+      theme_void() +
+      theme(
+        panel.background = element_rect(fill = "white", color = "gray50", size = 0.5),
+        plot.background = element_rect(fill = "white", color = NA),
+        legend.position = "none",
+        plot.margin = margin(1, 1, 1, 1)
+      )
+    
+    return(p_inset)
+  }
+  
+  # 生成所有 inset
+  inset_plots <- lapply(new_strain_names_vec, function(s) create_inset_for_strain(s, df_filtered))
+  names(inset_plots) <- new_strain_names_vec
+  
+  # ============================================================================
+  # 合并主图和嵌入图 (修改了小图尺寸)
+  # ============================================================================
+  p_main_gtable <- ggplotGrob(p_main)
+  panels <- grep("panel", p_main_gtable$layout$name)
+  
+  for (i in seq_along(panels)) {
+    panel_idx <- panels[i]
+    strain_name <- new_strain_names_vec[i]
+    panel_coords <- p_main_gtable$layout[panel_idx, ]
+    
+    inset_grob <- ggplotGrob(inset_plots[[strain_name]])
+    
+    # 位置修改：移动到右上角，并适度减小尺寸
+    # 之前的尺寸: width = 0.40, height = 0.45
+    # 现在的尺寸: width = 0.35, height = 0.40 (稍微小一点)
+    inset_grob_with_vp <- grid::editGrob(
+      inset_grob,
+      vp = grid::viewport(
+        x = grid::unit(0.98, "npc"),      # 靠右
+        y = grid::unit(0.98, "npc"),      # 靠上
+        width = grid::unit(0.35, "npc"),  # 宽度 35%
+        height = grid::unit(0.40, "npc"), # 高度 40%
+        just = c("right", "top")          # 对齐方式
+      )
+    )
+    
+    p_main_gtable <- gtable_add_grob(
+      p_main_gtable,
+      inset_grob_with_vp,
+      t = panel_coords$t, l = panel_coords$l,
+      b = panel_coords$b, r = panel_coords$r,
+      name = paste0("inset_", i)
+    )
+  }
+  
+  return(p_main_gtable)
 }
 
-# Define colors and linetypes for each duration
-colors_3d <- c("0% (Baseline)" = "#999999",
-               "3d -50%" = "#1B4F72", "3d -30%" = "#21618C", "3d -20%" = "#3498DB",
-               "3d -10%" = "#5DADE2", "3d -5%" = "#AED6F1",
-               "3d +5%" = "#FADBD8", "3d +10%" = "#F5B7B1",
-               "3d +20%" = "#E74C3C", "3d +30%" = "#C0392B", "3d +50%" = "#922B21")
 
-linetypes_3d <- c("0% (Baseline)" = "solid",
-                  "3d -50%" = "solid", "3d -30%" = "dashed", "3d -20%" = "dotted",
-                  "3d -10%" = "dotdash", "3d -5%" = "longdash",
-                  "3d +5%" = "longdash", "3d +10%" = "dotdash",
-                  "3d +20%" = "dotted", "3d +30%" = "dashed", "3d +50%" = "solid")
+# ============================================================================
+# 4. 生成所有图表
+# ============================================================================
 
-selected_3d <- c("Historical Fit", "0% (Baseline)", 
-                 "3d -50%", "3d -30%", "3d -20%", "3d -10%", "3d -5%",
-                 "3d +5%", "3d +10%", "3d +20%", "3d +30%", "3d +50%")
+cat("\n=== Generating Figure 2 Scenarios (Uniform Labels, Smaller Insets) ===\n")
 
-p2_3days <- create_scenario_plot(selected_3d, 
-                                 "Typhoon Impact: Recent Period and 3 Days Duration Scenarios", 
-                                 colors_3d, linetypes_3d)
-print(p2_3days)
-ggsave("figure2_typhoon_scenarios_3days.png", p2_3days, width = 14, height = 10, dpi = 300, bg = "white")
+# 3 days
+cat("Processing 3 days...\n")
+p2_3d <- create_scenario_plot_with_insets(selected_3d, "Typhoon Impact: 3 Days Scenarios", colors_3d, linetypes_3d, 3)
+grid::grid.newpage(); grid::grid.draw(p2_3d)
+# ggsave("Fig2_3days_Activity.png", p2_3d, width=14, height=10, bg="white")
 
 # 7 days
-colors_7d <- c("0% (Baseline)" = "#999999",
-               "7d -50%" = "#1B4F72", "7d -30%" = "#21618C", "7d -20%" = "#3498DB",
-               "7d -10%" = "#5DADE2", "7d -5%" = "#AED6F1",
-               "7d +5%" = "#FADBD8", "7d +10%" = "#F5B7B1",
-               "7d +20%" = "#E74C3C", "7d +30%" = "#C0392B", "7d +50%" = "#922B21")
-
-linetypes_7d <- c("0% (Baseline)" = "solid",
-                  "7d -50%" = "solid", "7d -30%" = "dashed", "7d -20%" = "dotted",
-                  "7d -10%" = "dotdash", "7d -5%" = "longdash",
-                  "7d +5%" = "longdash", "7d +10%" = "dotdash",
-                  "7d +20%" = "dotted", "7d +30%" = "dashed", "7d +50%" = "solid")
-
-selected_7d <- c("Historical Fit", "0% (Baseline)", 
-                 "7d -50%", "7d -30%", "7d -20%", "7d -10%", "7d -5%",
-                 "7d +5%", "7d +10%", "7d +20%", "7d +30%", "7d +50%")
-
-p2_7days <- create_scenario_plot(selected_7d, 
-                                 "Typhoon Impact: Recent Period and 7 Days Duration Scenarios", 
-                                 colors_7d, linetypes_7d)
-print(p2_7days)
-ggsave("figure2_typhoon_scenarios_7days.png", p2_7days, width = 14, height = 10, dpi = 300, bg = "white")
+cat("Processing 7 days...\n")
+p2_7d <- create_scenario_plot_with_insets(selected_7d, "Typhoon Impact: 7 Days Scenarios", colors_7d, linetypes_7d, 7)
+grid::grid.newpage(); grid::grid.draw(p2_7d)
+# ggsave("Fig2_7days_Activity.png", p2_7d, width=14, height=10, bg="white")
 
 # 10 days
-colors_10d <- c("0% (Baseline)" = "#999999",
-                "10d -50%" = "#1B4F72", "10d -30%" = "#21618C", "10d -20%" = "#3498DB",
-                "10d -10%" = "#5DADE2", "10d -5%" = "#AED6F1",
-                "10d +5%" = "#FADBD8", "10d +10%" = "#F5B7B1",
-                "10d +20%" = "#E74C3C", "10d +30%" = "#C0392B", "10d +50%" = "#922B21")
-
-linetypes_10d <- c("0% (Baseline)" = "solid",
-                   "10d -50%" = "solid", "10d -30%" = "dashed", "10d -20%" = "dotted",
-                   "10d -10%" = "dotdash", "10d -5%" = "longdash",
-                   "10d +5%" = "longdash", "10d +10%" = "dotdash",
-                   "10d +20%" = "dotted", "10d +30%" = "dashed", "10d +50%" = "solid")
-
-selected_10d <- c("Historical Fit", "0% (Baseline)", 
-                  "10d -50%", "10d -30%", "10d -20%", "10d -10%", "10d -5%",
-                  "10d +5%", "10d +10%", "10d +20%", "10d +30%", "10d +50%")
-
-p2_10days <- create_scenario_plot(selected_10d, 
-                                  "Typhoon Impact: Recent Period and 10 Days Duration Scenarios", 
-                                  colors_10d, linetypes_10d)
-print(p2_10days)
-ggsave("figure2_typhoon_scenarios_10days.png", p2_10days, width = 14, height = 10, dpi = 300, bg = "white")
+cat("Processing 10 days...\n")
+p2_10d <- create_scenario_plot_with_insets(selected_10d, "Typhoon Impact: 10 Days Scenarios", colors_10d, linetypes_10d, 10)
+grid::grid.newpage(); grid::grid.draw(p2_10d)
+# ggsave("Fig2_10days_Activity.png", p2_10d, width=14, height=10, bg="white")
 
 # 14 days
-colors_14d <- c("0% (Baseline)" = "#999999",
-                "14d -50%" = "#1B4F72", "14d -30%" = "#21618C", "14d -20%" = "#3498DB",
-                "14d -10%" = "#5DADE2", "14d -5%" = "#AED6F1",
-                "14d +5%" = "#FADBD8", "14d +10%" = "#F5B7B1",
-                "14d +20%" = "#E74C3C", "14d +30%" = "#C0392B", "14d +50%" = "#922B21")
+cat("Processing 14 days...\n")
+p2_14d <- create_scenario_plot_with_insets(selected_14d, "Typhoon Impact: 14 Days Scenarios", colors_14d, linetypes_14d, 14)
+grid::grid.newpage(); grid::grid.draw(p2_14d)
+# ggsave("Fig2_14days_Activity.png", p2_14d, width=14, height=10, bg="white")
 
-linetypes_14d <- c("0% (Baseline)" = "solid",
-                   "14d -50%" = "solid", "14d -30%" = "dashed", "14d -20%" = "dotted",
-                   "14d -10%" = "dotdash", "14d -5%" = "longdash",
-                   "14d +5%" = "longdash", "14d +10%" = "dotdash",
-                   "14d +20%" = "dotted", "14d +30%" = "dashed", "14d +50%" = "solid")
+# Shifted
+cat("Processing Shifted Timing...\n")
+p2_shift <- create_scenario_plot_with_insets(selected_shifted, "Typhoon Impact: Shifted Timing (7d -50%)", colors_shifted, linetypes_shifted, 7)
+grid::grid.newpage(); grid::grid.draw(p2_shift)
+# ggsave("Fig2_Shifted_Activity.png", p2_shift, width=14, height=10, bg="white")
 
-selected_14d <- c("Historical Fit", "0% (Baseline)", 
-                  "14d -50%", "14d -30%", "14d -20%", "14d -10%", "14d -5%",
-                  "14d +5%", "14d +10%", "14d +20%", "14d +30%", "14d +50%")
-
-p2_14days <- create_scenario_plot(selected_14d, 
-                                  "Typhoon Impact: Recent Period and 14 Days Duration Scenarios", 
-                                  colors_14d, linetypes_14d)
-print(p2_14days)
-ggsave("figure2_typhoon_scenarios_14days.png", p2_14days, width = 14, height = 10, dpi = 300, bg = "white")
-
-# Shifted scenarios
-selected_shifted <- c("Historical Fit", "0% (Baseline)", 
-                      "7d -50% E7", "7d -50% E5", "7d -50% E3",
-                      "7d -50% D3", "7d -50% D5", "7d -50% D7")
-
-colors_shifted <- c("0% (Baseline)" = "#999999",
-                    "7d -50% E7" = "#1B4F72", "7d -50% E5" = "#21618C", "7d -50% E3" = "#3498DB",
-                    "7d -50% D3" = "#E74C3C", "7d -50% D5" = "#C0392B", "7d -50% D7" = "#922B21")
-
-linetypes_shifted <- c("0% (Baseline)" = "solid",
-                       "7d -50% E7" = "solid", "7d -50% E5" = "dashed", "7d -50% E3" = "dotted",
-                       "7d -50% D3" = "dotted", "7d -50% D5" = "dashed", "7d -50% D7" = "solid")
-
-p2_shifted <- create_scenario_plot(selected_shifted, 
-                                   "Typhoon Impact: Recent Period and Shifted Timing Scenarios (7d -50%)", 
-                                   colors_shifted, linetypes_shifted)
-print(p2_shifted)
-ggsave("figure2_typhoon_scenarios_shifted.png", p2_shifted, width = 14, height = 10, dpi = 300, bg = "white")
-
-cat("Figures 1-2 complete\n\n")
-
-
-
-
-
-
+cat("\n=== All Figures Completed ===\n")
 # FIGURES 3-6: Baseline vs Typhoon Forecasts (WITH CONTINUITY)
 # ============================================================================
 
@@ -1223,14 +1379,6 @@ cat("Figure 7 complete\n\n")
 # 统一的起始周：从历史数据最后3周开始
 reff_start_week <- T_weeks - 8
 
-cat("R_eff visualization start week:", reff_start_week, "\n")
-cat("R_eff visualization start date:", as.character(all_dates[reff_start_week]), "\n")
-cat("Historical data ends at week:", T_weeks, "\n")
-cat("Historical data end date:", as.character(all_dates[T_weeks]), "\n")
-cat("Total weeks to display:", T_weeks_total - reff_start_week + 1, "\n")
-cat("Date range:", as.character(all_dates[reff_start_week]), "to", 
-    as.character(all_dates[T_weeks_total]), "\n\n")
-
 # ============================================================================
 # FIGURE 8: Effective Reproduction Number (Rt) by Scenario (Recent Period)
 # ============================================================================
@@ -1297,7 +1445,7 @@ for (i in 1:N_strains) {
 cat("\n")
 
 # Function to create reff plot for selected scenarios (with adaptive Y-axis)
-create_reff_plot <- function(selected_scenarios, plot_title, colors, linetypes) {
+create_reff_plot <- function(selected_scenarios, plot_title, colors, linetypes, viz_start_date, viz_end_date, viz_recovery_start) {
   df_filtered <- reff_scenarios_df %>% filter(scenario %in% selected_scenarios)
   df_filtered$scenario <- factor(df_filtered$scenario, levels = selected_scenarios)
   
@@ -1306,16 +1454,16 @@ create_reff_plot <- function(selected_scenarios, plot_title, colors, linetypes) 
     geom_vline(xintercept = max(fitting_data$date),
                linetype = "dashed", color = "gray40", size = 0.6, alpha = 0.6) +
     annotate("rect",
-             xmin = typhoon_start_date_line,
-             xmax = typhoon_end_date_line,
+             xmin = viz_start_date,
+             xmax = viz_end_date,
              ymin = -Inf, ymax = Inf,
              fill = "pink", alpha = 0.15) +
     annotate("rect",
-             xmin = recovery_start_date,
+             xmin = viz_recovery_start,
              xmax = max(forecast_dates),
              ymin = -Inf, ymax = Inf,
              fill = "lightgreen", alpha = 0.1) +
-    geom_vline(xintercept = typhoon_end_date_line,
+    geom_vline(xintercept = viz_end_date,
                linetype = "dashed", color = "red", size = 0.7, alpha = 0.7) +
     geom_ribbon(aes(ymin = R_lower, ymax = R_upper, fill = scenario), alpha = 0.15) +
     geom_line(aes(y = R_eff, color = scenario, linetype = scenario), size = 1.1) +
@@ -1377,7 +1525,8 @@ selected_3d_reff <- c("0% (Baseline)", "3d -50%", "3d -30%", "3d -20%", "3d -10%
                       "3d +5%", "3d +10%", "3d +20%", "3d +30%", "3d +50%")
 p8_3days <- create_reff_plot(selected_3d_reff, 
                              "Effective Reproduction Number (R_eff) by Typhoon Scenario - 3 Days Duration", 
-                             colors_3d, linetypes_3d)
+                             colors_3d, linetypes_3d,
+                             typhoon_start_date_line, typhoon_start_date_line + 7, typhoon_start_date_line + 7)
 print(p8_3days)
 ggsave("figure8_reff_scenarios_3days.png", p8_3days, width = 14, height = 10, dpi = 300, bg = "white")
 
@@ -1385,7 +1534,8 @@ selected_7d_reff <- c("0% (Baseline)", "7d -50%", "7d -30%", "7d -20%", "7d -10%
                       "7d +5%", "7d +10%", "7d +20%", "7d +30%", "7d +50%")
 p8_7days <- create_reff_plot(selected_7d_reff, 
                              "Effective Reproduction Number (R_eff) by Typhoon Scenario - 7 Days Duration", 
-                             colors_7d, linetypes_7d)
+                             colors_7d, linetypes_7d,
+                             typhoon_start_date_line, typhoon_start_date_line + 7, typhoon_start_date_line + 7)
 print(p8_7days)
 ggsave("figure8_reff_scenarios_7days.png", p8_7days, width = 14, height = 10, dpi = 300, bg = "white")
 
@@ -1393,7 +1543,8 @@ selected_10d_reff <- c("0% (Baseline)", "10d -50%", "10d -30%", "10d -20%", "10d
                        "10d +5%", "10d +10%", "10d +20%", "10d +30%", "10d +50%")
 p8_10days <- create_reff_plot(selected_10d_reff, 
                               "Effective Reproduction Number (R_eff) by Typhoon Scenario - 10 Days Duration", 
-                              colors_10d, linetypes_10d)
+                              colors_10d, linetypes_10d,
+                              typhoon_start_date_line, typhoon_start_date_line + 7, typhoon_start_date_line + 7)
 print(p8_10days)
 ggsave("figure8_reff_scenarios_10days.png", p8_10days, width = 14, height = 10, dpi = 300, bg = "white")
 
@@ -1401,7 +1552,8 @@ selected_14d_reff <- c("0% (Baseline)", "14d -50%", "14d -30%", "14d -20%", "14d
                        "14d +5%", "14d +10%", "14d +20%", "14d +30%", "14d +50%")
 p8_14days <- create_reff_plot(selected_14d_reff, 
                               "Effective Reproduction Number (R_eff) by Typhoon Scenario - 14 Days Duration", 
-                              colors_14d, linetypes_14d)
+                              colors_14d, linetypes_14d,
+                              typhoon_start_date_line, typhoon_start_date_line + 14, typhoon_start_date_line + 14)
 print(p8_14days)
 ggsave("figure8_reff_scenarios_14days.png", p8_14days, width = 14, height = 10, dpi = 300, bg = "white")
 
@@ -1409,20 +1561,21 @@ selected_shifted_reff <- c("0% (Baseline)", "7d -50% E7", "7d -50% E5", "7d -50%
                            "7d -50% D3", "7d -50% D5", "7d -50% D7")
 p8_shifted <- create_reff_plot(selected_shifted_reff, 
                                "Effective Reproduction Number (R_eff) by Typhoon Scenario - Shifted Timing Scenarios", 
-                               colors_shifted, linetypes_shifted)
+                               colors_shifted, linetypes_shifted,
+                               typhoon_start_date_line, typhoon_start_date_line + 7, typhoon_start_date_line + 7)
 print(p8_shifted)
-cat("\n=== Figure 8 series with adaptive Y-axis complete ===\n")
-cat("✓ Each strain now has Y-axis optimized for its actual R_eff range\n")
-cat("✓ Changes are more visible while maintaining R=1 reference line\n")
-cat("✓ Saved as: figure8_reff_scenarios_*_adaptive.png\n\n")
-
 # ============================================================================
-# FIGURE 9: Change in R_eff from Baseline - Separate for each duration
+# FIGURE 9: Percentage Change in R_eff from Baseline (Relative Change)
 # ============================================================================
-cat("\n=== Creating Figure 9: Change in R_eff from Baseline ===\n")
+cat("\n=== Creating Figure 9: Percentage Change in R_eff from Baseline ===\n")
 
+# 1. 数据准备部分：修改为计算相对变化百分比
+# ============================================================================
 reff_change_start_week <- T_weeks - 1
 reff_change_list <- list()
+
+# 定义基准场景索引 (通常是 index 1)
+baseline_idx <- 1
 
 for (typhoon_idx in 2:47) {
   for (strain_idx in 1:N_strains) {
@@ -1430,24 +1583,26 @@ for (typhoon_idx in 2:47) {
     dates_subset <- all_dates[weeks_subset]
     
     # Get baseline (scenario 1) posterior samples
-    base_reff_samples <- R_eff_scenarios[, 1, weeks_subset, strain_idx]
+    base_reff_samples <- R_eff_scenarios[, baseline_idx, weeks_subset, strain_idx]
     
     # Get current scenario posterior samples
     scen_reff_samples <- R_eff_scenarios[, typhoon_idx, weeks_subset, strain_idx]
     
-    # Calculate difference distribution
-    diff_dist <- scen_reff_samples - base_reff_samples
+    # [关键修改] Calculate Percentage Change Distribution
+    # 公式: ((Scenario - Baseline) / Baseline) * 100
+    # 这样可以得到相对于基准的百分比变化，消除了绝对数值大小的影响
+    pct_change_dist <- (scen_reff_samples - base_reff_samples) / base_reff_samples * 100
     
-    # Calculate statistics across samples
-    R_eff_change_mean <- apply(diff_dist, 2, mean)
-    R_change_lower <- apply(diff_dist, 2, quantile, probs = 0.025)
-    R_change_upper <- apply(diff_dist, 2, quantile, probs = 0.975)
+    # Calculate statistics across samples (Mean & CI of the percentage change)
+    R_eff_change_mean <- apply(pct_change_dist, 2, mean)
+    R_change_lower <- apply(pct_change_dist, 2, quantile, probs = 0.025)
+    R_change_upper <- apply(pct_change_dist, 2, quantile, probs = 0.975)
     
     reff_change_list[[length(reff_change_list) + 1]] <- data.frame(
       week = weeks_subset,
       date = dates_subset,
       strain = strain_names[strain_idx],
-      R_eff_change = R_eff_change_mean,
+      R_eff_change = R_eff_change_mean, # 这里现在存储的是百分比
       R_change_lower = R_change_lower,
       R_change_upper = R_change_upper,
       scenario = typhoon_scenarios[typhoon_idx]
@@ -1457,31 +1612,51 @@ for (typhoon_idx in 2:47) {
 
 reff_change_df <- do.call(rbind, reff_change_list)
 reff_change_df$strain <- factor(reff_change_df$strain, levels = strain_names)
+# 确保 scenario 的 levels 顺序正确
 reff_change_df$scenario <- factor(reff_change_df$scenario, levels = typhoon_scenarios[2:47])
 
-# Function to create reff change plot for selected scenarios
-create_reff_change_plot <- function(selected_scenarios, plot_title, colors, linetypes) {
+
+# 2. 修改后的绘图函数：适配百分比变化
+# ============================================================================
+create_reff_change_plot <- function(selected_scenarios, plot_title, colors, linetypes, 
+                                    viz_start_date, viz_end_date) {
+  
   df_filtered <- reff_change_df %>% filter(scenario %in% selected_scenarios)
   df_filtered$scenario <- factor(df_filtered$scenario, levels = selected_scenarios)
   
+  # 恢复期起始点
+  viz_recovery_start <- viz_end_date 
+  
   p <- ggplot(df_filtered, aes(x = date)) +
+    # 零线 (0% 表示与 Baseline 无差异)
     geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5, size = 0.8) +
+    
+    # 拟合数据截止线
     geom_vline(xintercept = max(fitting_data$date),
                linetype = "dashed", color = "gray40", size = 0.6, alpha = 0.6) +
+    
+    # [动态] 台风期间背景 (粉色)
     annotate("rect",
-             xmin = typhoon_start_date_line,
-             xmax = typhoon_end_date_line,
+             xmin = viz_start_date,
+             xmax = viz_end_date,
              ymin = -Inf, ymax = Inf,
              fill = "pink", alpha = 0.15) +
+    
+    # [动态] 恢复期间背景 (浅绿色)
     annotate("rect",
-             xmin = recovery_start_date,
+             xmin = viz_recovery_start,
              xmax = max(forecast_dates),
              ymin = -Inf, ymax = Inf,
              fill = "lightgreen", alpha = 0.1) +
-    geom_vline(xintercept = typhoon_end_date_line,
+    
+    # [动态] 台风结束分割线
+    geom_vline(xintercept = viz_end_date,
                linetype = "dashed", color = "red", size = 0.7, alpha = 0.7) +
+    
+    # 数据层
     geom_ribbon(aes(ymin = R_change_lower, ymax = R_change_upper, fill = scenario), alpha = 0.15) +
     geom_line(aes(y = R_eff_change, color = scenario, linetype = scenario), size = 1.1) +
+    
     facet_wrap(~strain, scales = "free_y", ncol = 2, nrow = 3) +
     scale_color_manual(name = "Scenarios:", values = colors) +
     scale_fill_manual(name = "Scenarios:", values = colors) +
@@ -1489,9 +1664,10 @@ create_reff_change_plot <- function(selected_scenarios, plot_title, colors, line
     scale_x_date(date_labels = "%m-%d", date_breaks = "1 week") +
     labs(
       title = plot_title,
-      subtitle = "Negative values indicate reduction in transmission | Positive values indicate increase | ΔR_eff = R_eff(scenario) - R_eff(baseline)",
+      subtitle = paste0("Typhoon Period: ", format(viz_start_date, "%m-%d"), " to ", format(viz_end_date, "%m-%d"), 
+                        " | Values are % Change relative to Baseline (0% = No Change)"),
       x = NULL,
-      y = "ΔR_eff"
+      y = "% Change in R_eff"  # 更新 Y 轴标签
     ) +
     theme_minimal(base_size = 11) +
     theme(
@@ -1507,12 +1683,9 @@ create_reff_change_plot <- function(selected_scenarios, plot_title, colors, line
       axis.title.y = element_text(size = 10, face = "bold", margin = margin(r = 8)),
       axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
       legend.position = "bottom",
-      legend.direction = "horizontal",
       legend.box = "horizontal",
       legend.background = element_rect(fill = "white", color = "gray40", size = 0.3),
       legend.title = element_text(size = 9, face = "bold"),
-      legend.text = element_text(size = 8.5),
-      legend.margin = margin(t = 5, b = 5),
       plot.title = element_text(size = 13, face = "bold"),
       plot.subtitle = element_text(size = 8.5, color = "gray30")
     ) +
@@ -1525,56 +1698,162 @@ create_reff_change_plot <- function(selected_scenarios, plot_title, colors, line
   return(p)
 }
 
-# Define colors for change plots (excluding baseline)
+
+# 3. 分别生成不同时长的图表
+# ============================================================================
+
+# --- 3 Days Duration ---
 colors_3d_change <- colors_3d[names(colors_3d) != "0% (Baseline)"]
 linetypes_3d_change <- linetypes_3d[names(linetypes_3d) != "0% (Baseline)"]
 selected_3d_change <- selected_3d[selected_3d != "0% (Baseline)" & selected_3d != "Historical Fit"]
 
-p9_3days <- create_reff_change_plot(selected_3d_change, 
-                                    "Change in R_eff from Baseline - 3 Days Duration", 
-                                    colors_3d_change, linetypes_3d_change)
-print(p9_3days)
-ggsave("figure9_reff_change_3days.png", p9_3days, width = 14, height = 10, dpi = 300, bg = "white")
+# 计算 3 天的结束日期
+date_end_3d <- typhoon_start_date_line + 7
 
+p9_3days <- create_reff_change_plot(selected_3d_change, 
+                                    "Relative Change in R_eff - 3 Days Duration", 
+                                    colors_3d_change, linetypes_3d_change,
+                                    typhoon_start_date_line, date_end_3d)
+print(p9_3days)
+ggsave("figure9_reff_pct_change_3days.png", p9_3days, width = 14, height = 10, dpi = 300, bg = "white")
+
+
+# --- 7 Days Duration ---
 colors_7d_change <- colors_7d[names(colors_7d) != "0% (Baseline)"]
 linetypes_7d_change <- linetypes_7d[names(linetypes_7d) != "0% (Baseline)"]
 selected_7d_change <- selected_7d[selected_7d != "0% (Baseline)" & selected_7d != "Historical Fit"]
 
-p9_7days <- create_reff_change_plot(selected_7d_change, 
-                                    "Change in R_eff from Baseline - 7 Days Duration", 
-                                    colors_7d_change, linetypes_7d_change)
-print(p9_7days)
-ggsave("figure9_reff_change_7days.png", p9_7days, width = 14, height = 10, dpi = 300, bg = "white")
+# 计算 7 天的结束日期
+date_end_7d <- typhoon_start_date_line + 7
 
+p9_7days <- create_reff_change_plot(selected_7d_change, 
+                                    "Relative Change in R_eff - 7 Days Duration", 
+                                    colors_7d_change, linetypes_7d_change,
+                                    typhoon_start_date_line, date_end_7d)
+print(p9_7days)
+ggsave("figure9_reff_pct_change_7days.png", p9_7days, width = 14, height = 10, dpi = 300, bg = "white")
+
+
+# --- 10 Days Duration ---
 colors_10d_change <- colors_10d[names(colors_10d) != "0% (Baseline)"]
 linetypes_10d_change <- linetypes_10d[names(linetypes_10d) != "0% (Baseline)"]
 selected_10d_change <- selected_10d[selected_10d != "0% (Baseline)" & selected_10d != "Historical Fit"]
 
-p9_10days <- create_reff_change_plot(selected_10d_change, 
-                                     "Change in R_eff from Baseline - 10 Days Duration", 
-                                     colors_10d_change, linetypes_10d_change)
-print(p9_10days)
-ggsave("figure9_reff_change_10days.png", p9_10days, width = 14, height = 10, dpi = 300, bg = "white")
+# 计算 10 天的结束日期
+date_end_10d <- typhoon_start_date_line + 7
 
+p9_10days <- create_reff_change_plot(selected_10d_change, 
+                                     "Relative Change in R_eff - 10 Days Duration", 
+                                     colors_10d_change, linetypes_10d_change,
+                                     typhoon_start_date_line, date_end_10d)
+print(p9_10days)
+ggsave("figure9_reff_pct_change_10days.png", p9_10days, width = 14, height = 10, dpi = 300, bg = "white")
+
+
+# --- 14 Days Duration ---
 colors_14d_change <- colors_14d[names(colors_14d) != "0% (Baseline)"]
 linetypes_14d_change <- linetypes_14d[names(linetypes_14d) != "0% (Baseline)"]
 selected_14d_change <- selected_14d[selected_14d != "0% (Baseline)" & selected_14d != "Historical Fit"]
 
-p9_14days <- create_reff_change_plot(selected_14d_change, 
-                                     "Change in R_eff from Baseline - 14 Days Duration", 
-                                     colors_14d_change, linetypes_14d_change)
-print(p9_14days)
-ggsave("figure9_reff_change_14days.png", p9_14days, width = 14, height = 10, dpi = 300, bg = "white")
+# 计算 14 天的结束日期
+date_end_14d <- typhoon_start_date_line + 14
 
+p9_14days <- create_reff_change_plot(selected_14d_change, 
+                                     "Relative Change in R_eff - 14 Days Duration", 
+                                     colors_14d_change, linetypes_14d_change,
+                                     typhoon_start_date_line, date_end_14d)
+print(p9_14days)
+ggsave("figure9_reff_pct_change_14days.png", p9_14days, width = 14, height = 10, dpi = 300, bg = "white")
+
+
+# --- Shifted Timing Scenarios ---
 colors_shifted_change <- colors_shifted[names(colors_shifted) != "0% (Baseline)"]
 linetypes_shifted_change <- linetypes_shifted[names(linetypes_shifted) != "0% (Baseline)"]
 selected_shifted_change <- selected_shifted[selected_shifted != "0% (Baseline)" & selected_shifted != "Historical Fit"]
 
 p9_shifted <- create_reff_change_plot(selected_shifted_change, 
-                                      "Change in R_eff from Baseline - Shifted Timing Scenarios", 
-                                      colors_shifted_change, linetypes_shifted_change)
+                                      "Relative Change in R_eff - Shifted Timing Scenarios", 
+                                      colors_shifted_change, linetypes_shifted_change,
+                                      typhoon_start_date_line, typhoon_end_date_line)
 print(p9_shifted)
 
+
+
+
+
+
+library(dplyr)
+library(knitr)
+
+cat("\n=== Table: Impact of 7-Day Typhoon Reduction Scenarios (Clean) ===\n")
+
+# 1. 筛选场景：基于你提供的命名格式
+# ============================================================================
+# 逻辑：只选择包含 "-" (负号) 的场景，这就自动排除了 "+"(增加) 和 "Baseline"
+target_scens <- grep("-", selected_7d, value = TRUE)
+
+# [调试] 打印确认选中的场景
+cat("Selected Scenarios:\n")
+print(target_scens)
+
+# 找到对应的全局索引
+target_indices <- match(target_scens, typhoon_scenarios)
+
+# 锁定时间窗
+t_start_idx <- which(all_dates == typhoon_start_date_line)
+t_window_idxs <- t_start_idx:(t_start_idx + 6) 
+
+summary_list <- list()
+
+# 2. 循环计算
+# ============================================================================
+if (length(target_indices) > 0) {
+  
+  for (idx in target_indices) {
+    if(is.na(idx)) next 
+    
+    for (st_idx in 1:N_strains) {
+      
+      base_mat <- R_eff_scenarios[, 1, t_window_idxs, st_idx]
+      scen_mat <- R_eff_scenarios[, idx, t_window_idxs, st_idx]
+      
+      # 计算相对变化百分比
+      pct_matrix <- (scen_mat - base_mat) / base_mat * 100
+      avg_impact_per_sample <- rowMeans(pct_matrix)
+      
+      mean_val <- mean(avg_impact_per_sample)
+      lower_val <- quantile(avg_impact_per_sample, 0.025)
+      upper_val <- quantile(avg_impact_per_sample, 0.975)
+      
+      summary_list[[length(summary_list) + 1]] <- data.frame(
+        Strain = strain_names[st_idx],
+        Scenario = typhoon_scenarios[idx],
+        # 结果格式化: "-5.23% [-7.10, -3.50]"
+        Result_Str = sprintf("%.2f%% [%.2f, %.2f]", mean_val, lower_val, upper_val)
+      )
+    }
+  }
+  
+  # 3. 生成美观表格
+  # ============================================================================
+  final_table <- do.call(rbind, summary_list) %>%
+    # [关键步骤] 提取数字用于排序：从 "7d -5%" 中提取出 5，从 "7d -50%" 提取出 50
+    # 这样可以确保 5% 排在 10% 前面，而不是按字符串顺序
+    mutate(Intensity_Sort = as.numeric(gsub("[^0-9]", "", Scenario))) %>% 
+    arrange(Strain, Intensity_Sort) %>% 
+    # 只保留展示列
+    select(Strain, Scenario, `Mean % Change [95% CI]` = Result_Str)
+  
+  # 输出 Markdown 表格
+  print(kable(final_table, align = "llc", 
+              caption = "Table: Reduction in Rt during 7-Day Typhoon"))
+  
+  # 如果需要导出
+  # write.csv(final_table, "table_reff_reduction_7d_final.csv", row.names = FALSE)
+  
+} else {
+  warning("没有找到包含负号 '-' 的场景，请检查 selected_7d。")
+}
 # ============================================================================
 # FIGURE 10: Typhoon Impact Effectiveness (Reduction During Typhoon Period)
 # ============================================================================
