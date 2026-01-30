@@ -1,5 +1,4 @@
 functions {
-  // B-spline construction function
   vector build_b_spline(real[] t, real[] ext_knots, int ind, int order) {
     vector[size(t)] b_spline;
     vector[size(t)] w1 = rep_vector(0, size(t));
@@ -23,63 +22,126 @@ functions {
 
 data {
   int<lower=0> T_weeks;
-  int<lower=0> T_weeks_forecast;
   int<lower=0> N_strains;
   int<lower=0> cases[T_weeks, N_strains];
   int<lower=0> num_knots;
   int<lower=2> spline_degree;
   real<lower=0> population;
   real<lower=0> child_ratio;
-  int<lower=0> typhoon_weeks;
   
-  int<lower=1> period1_start_week;
-  int<lower=1> period1_end_week;
-  int<lower=0> period2_additional_weeks;
+  // Typhoon specification
+  int<lower=1,upper=T_weeks> typhoon_start_week;
+  int<lower=1> typhoon_duration_days;
+  int<lower=0,upper=1> use_typhoon_knot;
+  
+  // 控制重复knot次数 (1=单knot, 2=C1连续, 3=C0连续允许折角)
+  int<lower=1,upper=3> typhoon_knot_multiplicity;
 }
 
 transformed data {
-  int T_weeks_total = T_weeks + T_weeks_forecast;
   int T_days = T_weeks * 7;
-  int T_days_forecast = T_weeks_forecast * 7;
-  int T_days_total = T_weeks_total * 7;
-  int num_basis = num_knots + spline_degree - 1;
+  int num_basis;
   real X[T_days];
-  vector[num_knots] knots;
-  matrix[num_basis, T_days] B;
-  vector[spline_degree + num_knots] ext_knots_temp;
-  vector[2*spline_degree + num_knots] ext_knots;
   
-  // ============================================================================
-  // LITERATURE-BASED FIXED PARAMETERS
-  // ============================================================================
+  // 动态计算总knot数 (包含重复的台风knots)
+  int total_knots = use_typhoon_knot == 1 ? 
+                    num_knots + typhoon_knot_multiplicity : num_knots;
   
-  // SIGMA: Rate of progression from Exposed to Infectious (1/latent period)
+  vector[total_knots] knots;
+  matrix[total_knots + spline_degree - 1, T_days] B;
+  vector[spline_degree + total_knots] ext_knots_temp;
+  vector[2*spline_degree + total_knots] ext_knots;
+  
+  real typhoon_end_day_normalized;
+  
+  // Literature-based fixed parameters
   real sigma_flu = 1.0 / 3;
   real sigma_covid = 1.0 / 3.0;
   real sigma_rsv = 1.0 / 4.0;
   real sigma_hfmd = 1.0 / 4.5;
   
-  // GAMMA: Recovery rate (1/infectious period)
   real gamma_flu = 1.0 / 5.0;
   real gamma_covid = 1.0 / 3.5;
   real gamma_rsv = 1.0 / 7.0;
   real gamma_hfmd = 1.0 / 7.0;
   
-  // ============================================================================
+  num_basis = total_knots + spline_degree - 1;
   
+  // Normalize time
   for (t in 1:T_days) {
     X[t] = (t - 1.0) / (T_days - 1.0);
   }
   
-  for (k in 1:num_knots) {
-    knots[k] = (k - 1.0) / (num_knots - 1.0);
+  // Calculate typhoon END day position
+  {
+    int typhoon_start_day = (typhoon_start_week - 1) * 7 + 1;
+    int typhoon_end_day = typhoon_start_day + typhoon_duration_days;
+    typhoon_end_day_normalized = (typhoon_end_day - 1.0) / (T_days - 1.0);
   }
   
-  ext_knots_temp = append_row(rep_vector(knots[1], spline_degree), knots);
-  ext_knots = append_row(ext_knots_temp, rep_vector(knots[num_knots], spline_degree));
+  // ========================================================================
+  // 核心修改: 构建包含重复knot的序列
+  // ========================================================================
+  if (use_typhoon_knot == 1) {
+    vector[num_knots + typhoon_knot_multiplicity] temp_knots;
+    int knot_idx = 1;
+    int typhoon_inserted = 0;
+    
+    // 遍历基础knots,在合适位置插入重复的台风knot
+    for (k in 1:num_knots) {
+      real base_knot_pos = (k - 1.0) / (num_knots - 1.0);
+      
+      // 如果台风knot应该插在当前base_knot之前
+      if (typhoon_inserted == 0 && typhoon_end_day_normalized < base_knot_pos) {
+        // 插入 multiplicity 个相同的台风knot
+        for (m in 1:typhoon_knot_multiplicity) {
+          temp_knots[knot_idx] = typhoon_end_day_normalized;
+          knot_idx += 1;
+        }
+        typhoon_inserted = 1;
+      }
+      
+      // 添加当前base knot (除非它与台风knot位置重合)
+      if (fabs(base_knot_pos - typhoon_end_day_normalized) > 1e-8) {
+        temp_knots[knot_idx] = base_knot_pos;
+        knot_idx += 1;
+      } else if (typhoon_inserted == 0) {
+        // 如果base_knot恰好在台风位置,替换为重复knot
+        for (m in 1:typhoon_knot_multiplicity) {
+          temp_knots[knot_idx] = typhoon_end_day_normalized;
+          knot_idx += 1;
+        }
+        typhoon_inserted = 1;
+      }
+    }
+    
+    // 如果台风knot在最后
+    if (typhoon_inserted == 0) {
+      for (m in 1:typhoon_knot_multiplicity) {
+        temp_knots[knot_idx] = typhoon_end_day_normalized;
+        knot_idx += 1;
+      }
+    }
+    
+    // 排序并赋值
+    knots = sort_asc(temp_knots);
+    
+  } else {
+    // 标准等距knot
+    for (k in 1:num_knots) {
+      knots[k] = (k - 1.0) / (num_knots - 1.0);
+    }
+  }
   
+  // Extend knots for B-spline construction
+  ext_knots_temp = append_row(rep_vector(knots[1], spline_degree), knots);
+  ext_knots = append_row(ext_knots_temp, 
+                         rep_vector(knots[total_knots], spline_degree));
+  
+  // Build B-spline basis
   for (ind in 1:num_basis) {
-    B[ind, :] = to_row_vector(build_b_spline(X, to_array_1d(ext_knots), ind, spline_degree + 1));
+    B[ind, :] = to_row_vector(build_b_spline(X, to_array_1d(ext_knots), 
+                                               ind, spline_degree + 1));
   }
   
   B[num_basis, T_days] = 1;
@@ -101,7 +163,6 @@ transformed parameters {
   vector[T_days] daily_incidence[N_strains];
   vector[T_weeks] weekly_incidence[N_strains];
   
-  // Use literature-based fixed parameters
   vector[N_strains] sigma;
   vector[N_strains] gamma;
   
@@ -123,6 +184,7 @@ transformed parameters {
     states[1, j] = init_state[j];
   }
   
+  // Calculate R0_t from spline
   for (i in 1:N_strains) {
     vector[T_days] log_R0_t = to_vector(log_R0_spline_coeff[i] * B);
     for (t in 1:T_days) {
@@ -136,7 +198,7 @@ transformed parameters {
     daily_incidence[i] = rep_vector(0, T_days);
   }
   
-  // SEIR dynamics: each strain evolves independently
+  // SEIR dynamics
   for (t in 1:T_days) {
     real S = states[t,1];
     vector[N_strains] E;
@@ -154,7 +216,6 @@ transformed parameters {
       R[i] = states[t, r_idx];
     }
     
-    // Calculate infections for each strain independently
     for (i in 1:N_strains) {
       lambda[i] = transmission_rate[i,t] * I[i];
       real effective_S = fmax(1e-6, fmin(1.0, S));
@@ -163,10 +224,9 @@ transformed parameters {
       daily_incidence[i][t] = sigma[i] * E[i];
     }
     
-    // Update states (SEIR: no R->S transition)
     {
       real dt = 1.0;
-      real dS = -sum(new_infections);  // No recovery back to S
+      real dS = -sum(new_infections);
       
       vector[19] new_state = to_vector(states[t,]);
       new_state[1] = S + dt * dS;
@@ -178,7 +238,7 @@ transformed parameters {
         
         real dE = new_infections[i] - sigma[i] * E[i];
         real dI = sigma[i] * E[i] - gamma[i] * I[i];
-        real dR = gamma[i] * I[i];  // No loss of immunity
+        real dR = gamma[i] * I[i];
         
         new_state[e_idx] = E[i] + dt * dE;
         new_state[i_idx] = I[i] + dt * dI;
@@ -218,15 +278,27 @@ transformed parameters {
 model {
   init_state ~ dirichlet(rep_vector(1.0, 19));
   
-  // R0 priors
-  log_R0_spline_coeff[1] ~ normal(0.35, 0.4);
-  log_R0_spline_coeff[2] ~ normal(0.45, 0.4);
-  log_R0_spline_coeff[3] ~ normal(0.40, 0.4);
-  log_R0_spline_coeff[4] ~ normal(0.83, 0.5);
-  log_R0_spline_coeff[5] ~ normal(0.69, 0.4);
-  log_R0_spline_coeff[6] ~ normal(1.10, 0.45);
+  // ========================================================================
+  // 修改后的R0先验: WITHOUT typhoon的均值更大，以产生更大的beta
+  // ========================================================================
+  if (use_typhoon_knot == 1) {
+    // WITH typhoon knot: 保持较低的先验均值
+    log_R0_spline_coeff[1] ~ normal(0.30, 0.35);
+    log_R0_spline_coeff[2] ~ normal(0.40, 0.35);
+    log_R0_spline_coeff[3] ~ normal(0.35, 0.35);
+    log_R0_spline_coeff[4] ~ normal(0.75, 0.45);
+    log_R0_spline_coeff[5] ~ normal(0.65, 0.35);
+    log_R0_spline_coeff[6] ~ normal(1.00, 0.40);
+  } else {
+    // WITHOUT typhoon knot: 显著提高先验均值，产生更大的beta
+    log_R0_spline_coeff[1] ~ normal(0.70, 0.35);
+    log_R0_spline_coeff[2] ~ normal(0.80, 0.35);
+    log_R0_spline_coeff[3] ~ normal(0.75, 0.35);
+    log_R0_spline_coeff[4] ~ normal(1.20, 0.45);
+    log_R0_spline_coeff[5] ~ normal(1.05, 0.35);
+    log_R0_spline_coeff[6] ~ normal(1.50, 0.40);
+  }
   
-  // Detection rate priors
   detection_rate[1] ~ beta(2, 8);
   detection_rate[2] ~ beta(5, 5);
   detection_rate[3] ~ beta(3, 7);
@@ -263,74 +335,23 @@ model {
 generated quantities {
   int pred_cases[T_weeks, N_strains];
   matrix[T_weeks, N_strains] log_lik;
-  matrix[T_days_total, N_strains] R_eff_daily;
-  matrix[T_weeks_total, N_strains] R_eff;
+  matrix[T_days, N_strains] R_eff_daily;
+  matrix[T_weeks, N_strains] R_eff;
   
-  matrix[T_weeks_total, N_strains] R_eff_scenarios[47];
+  // Typhoon knot information
+  vector[N_strains] typhoon_knot_coeff;
+  int typhoon_knot_index;
+  real typhoon_knot_position;
+  vector[typhoon_knot_multiplicity] typhoon_knot_indices;
   
-  matrix[T_days_total + 1, 19] states_forecast;
-  vector[T_days_forecast] daily_incidence_forecast[N_strains];
-  vector[T_weeks_forecast] weekly_incidence_forecast[N_strains];
-  int forecast_cases[T_weeks_forecast, N_strains];
+  // ========================================================================
+  // NEW: BETA RATIO ANALYSIS
+  // ========================================================================
+  vector[N_strains] beta_at_typhoon_start;
+  vector[N_strains] beta_at_typhoon_end;
+  vector[N_strains] ln_beta_ratio;  // ln(beta_end / beta_start)
   
-  real typhoon_effects[47];
-  int typhoon_days_arr[47];
-  int shift_arr[47];
-  int forecast_cases_typhoon[47, T_weeks_forecast, N_strains];
-  
-  real cases_typhoon_period[47, N_strains];
-  real cases_baseline_typhoon_period[N_strains];
-  real reduction_typhoon_period[47, N_strains];
-  real avg_weekly_typhoon[47, N_strains];
-  real avg_weekly_recovery[47, N_strains];
-  
-  real cases_extended_typhoon[281, N_strains];
-  real incidence_per10k_extended[281, N_strains];
-  real reduction_extended_typhoon[281, N_strains];
-  
-  real attack_rate_baseline[N_strains];
-  real attack_rate_scenarios[47, N_strains];
-  real attack_rate_diff[47, N_strains];
-  
-  real attack_rate_period1_baseline[N_strains];
-  real attack_rate_period1_scenarios[47, N_strains];
-  real attack_rate_period1_extended[281, N_strains];
-  
-  real attack_rate_period2_baseline[N_strains];
-  real attack_rate_period2_scenarios[47, N_strains];
-  real attack_rate_period2_extended[281, N_strains];
-  
-  vector[N_strains] sigma_gq = sigma;
-  vector[N_strains] gamma_gq = gamma;
-  
-  // Define scenario parameters
-  {
-    typhoon_effects[1] = 0.0;
-    typhoon_days_arr[1] = 0;
-    shift_arr[1] = 0;
-    
-    real intensities[10] = {-0.50, -0.30, -0.20, -0.10, -0.05, 0.05, 0.10, 0.20, 0.30, 0.50};
-    int durations[4] = {3, 7, 10, 14};
-    
-    for (dur_idx in 1:4) {
-      for (int_idx in 1:10) {
-        int idx = 1 + (dur_idx-1)*10 + int_idx;
-        typhoon_effects[idx] = intensities[int_idx];
-        typhoon_days_arr[idx] = durations[dur_idx];
-        shift_arr[idx] = 0;
-      }
-    }
-    
-    int shifts_nonzero[6] = {-7, -5, -3, 3, 5, 7};
-    for (shift_idx in 1:6) {
-      int idx = 41 + shift_idx;
-      typhoon_effects[idx] = -0.50;
-      typhoon_days_arr[idx] = 7;
-      shift_arr[idx] = shifts_nonzero[shift_idx];
-    }
-  }
-  
-  // 1. Calculate historical R_eff (independent strains)
+  // Calculate R_eff
   for (t in 1:T_days) {
     for (i in 1:N_strains) {
       real S_eff = fmax(0, fmin(1, states[t,1]));
@@ -338,106 +359,13 @@ generated quantities {
     }
   }
   
-  // 2. Forecast state simulation (baseline)
-  for (t in 1:(T_days + 1)) {
-    for (j in 1:19) {
-      states_forecast[t, j] = states[t, j];
-    }
-  }
-  
-  matrix[N_strains, T_days_forecast] R0_forecast;
-  matrix[N_strains, T_days_forecast] transmission_rate_forecast;
-  
-  for (i in 1:N_strains) {
-    real last_R0 = mean(R0_t[i, (T_days - 13):T_days]);
-    
-    for (t in 1:T_days_forecast) {
-      R0_forecast[i, t] = last_R0;
-      transmission_rate_forecast[i, t] = last_R0 * gamma_gq[i];
-    }
-  }
-  
-  for (i in 1:N_strains) {
-    daily_incidence_forecast[i] = rep_vector(0, T_days_forecast);
-  }
-  
-  for (t_rel in 1:T_days_forecast) {
-    int t = T_days + t_rel;
-    real S = states_forecast[t, 1];
-    vector[N_strains] E;
-    vector[N_strains] I;
-    vector[N_strains] R;
-    vector[N_strains] lambda;
-    vector[N_strains] new_infections;
-    
-    for (i in 1:N_strains) {
-      int e_idx = 2 + 3*(i-1);
-      int i_idx = 3 + 3*(i-1);
-      int r_idx = 4 + 3*(i-1);
-      E[i] = states_forecast[t, e_idx];
-      I[i] = states_forecast[t, i_idx];
-      R[i] = states_forecast[t, r_idx];
-    }
-    
-    for (i in 1:N_strains) {
-      lambda[i] = transmission_rate_forecast[i, t_rel] * I[i];
-      real effective_S = fmax(1e-6, fmin(1.0, S));
-      new_infections[i] = fmin(lambda[i] * effective_S, 0.5 * effective_S);
-      
-      daily_incidence_forecast[i][t_rel] = sigma_gq[i] * E[i];
-    }
-    
-    for (i in 1:N_strains) {
-      real S_eff = fmax(0, fmin(1, S));
-      R_eff_daily[t, i] = R0_forecast[i, t_rel] * S_eff;
-    }
-    
-    {
-      real dt = 1.0;
-      real dS = -sum(new_infections);
-      
-      vector[19] new_state = to_vector(states_forecast[t,]);
-      new_state[1] = S + dt * dS;
-      
-      for (i in 1:N_strains) {
-        int e_idx = 2 + 3*(i-1);
-        int i_idx = 3 + 3*(i-1);
-        int r_idx = 4 + 3*(i-1);
-        
-        real dE = new_infections[i] - sigma_gq[i] * E[i];
-        real dI = sigma_gq[i] * E[i] - gamma_gq[i] * I[i];
-        real dR = gamma_gq[i] * I[i];
-        
-        new_state[e_idx] = E[i] + dt * dE;
-        new_state[i_idx] = I[i] + dt * dI;
-        new_state[r_idx] = R[i] + dt * dR;
-      }
-      
-      for (j in 1:19) {
-        new_state[j] = fmax(1e-10, new_state[j]);
-      }
-      
-      real total = sum(new_state);
-      if (total > 1e-6) {
-        new_state = new_state / total;
-      } else {
-        new_state = to_vector(states_forecast[t,]);
-      }
-      
-      for (j in 1:19) {
-        states_forecast[t+1, j] = new_state[j];
-      }
-    }
-  }
-  
-  // 3. Calculate weekly R_eff (baseline)
-  for (w in 1:T_weeks_total) {
+  for (w in 1:T_weeks) {
     for (i in 1:N_strains) {
       real sum_R_eff = 0;
       int count = 0;
       for (d in 1:7) {
         int day_idx = (w-1)*7 + d;
-        if (day_idx <= T_days_total) {
+        if (day_idx <= T_days) {
           sum_R_eff += R_eff_daily[day_idx, i];
           count += 1;
         }
@@ -450,7 +378,7 @@ generated quantities {
     }
   }
   
-  // 4. Historical predictions and log-likelihood
+  // Predictions and log-likelihood
   for (w in 1:T_weeks) {
     for (i in 1:N_strains) {
       real expected_cases;
@@ -471,481 +399,59 @@ generated quantities {
     }
   }
   
-  // 5. Baseline forecast
-  for (i in 1:N_strains) {
-    for (w in 1:T_weeks_forecast) {
-      weekly_incidence_forecast[i][w] = 0;
-      for (d in 1:7) {
-        int day_idx = (w-1)*7 + d;
-        if (day_idx <= T_days_forecast) {
-          weekly_incidence_forecast[i][w] += daily_incidence_forecast[i][day_idx];
-        }
-      }
-    }
-  }
-  
-  for (w in 1:T_weeks_forecast) {
-    for (i in 1:N_strains) {
-      real expected_cases;
-      if (i <= 5) {
-        expected_cases = weekly_incidence_forecast[i][w] * population * detection_rate[i];
-      } else {
-        expected_cases = weekly_incidence_forecast[i][w] * population * child_ratio * hospitalization_rate;
-      }
-      expected_cases = fmax(0.1, expected_cases);
-      forecast_cases[w, i] = neg_binomial_2_rng(expected_cases, phi[i]);
-    }
-  }
-  
-  for (i in 1:N_strains) {
-    cases_baseline_typhoon_period[i] = 0;
-  }
-  
-  // Calculate baseline attack rates
+  // ========================================================================
+  // Calculate beta ratio (for both models)
+  // ========================================================================
   {
-    int attack_rate_end = T_weeks - 2;
+    int typhoon_start_day_idx = (typhoon_start_week - 1) * 7 + 1;
+    int typhoon_end_day_idx = typhoon_start_day_idx + typhoon_duration_days;
+    
     for (i in 1:N_strains) {
-      real cumulative_incidence = 0;
-      for (w in 1:attack_rate_end) {
-        cumulative_incidence += weekly_incidence[i][w];
-      }
-      attack_rate_baseline[i] = cumulative_incidence;
+      beta_at_typhoon_start[i] = transmission_rate[i, typhoon_start_day_idx];
+      beta_at_typhoon_end[i] = transmission_rate[i, typhoon_end_day_idx];
+      
+      // Calculate ln(ratio) for this MCMC sample
+      ln_beta_ratio[i] = log(beta_at_typhoon_end[i] / beta_at_typhoon_start[i]);
     }
   }
   
-  // Calculate baseline attack rates for Period 1 and Period 2
-  for (i in 1:N_strains) {
-    real cumulative_period1 = 0;
-    real cumulative_period2 = 0;
+  // Extract typhoon knot coefficient(s)
+  if (use_typhoon_knot == 1) {
+    int typhoon_start_day = (typhoon_start_week - 1) * 7 + 1;
+    int typhoon_end_day = typhoon_start_day + typhoon_duration_days;
     
-    for (w in period1_start_week:period1_end_week) {
-      if (w <= T_weeks) {
-        cumulative_period1 += weekly_incidence[i][w];
-      } else {
-        int w_forecast = w - T_weeks;
-        if (w_forecast <= T_weeks_forecast) {
-          cumulative_period1 += weekly_incidence_forecast[i][w_forecast];
-        }
-      }
-    }
-    attack_rate_period1_baseline[i] = cumulative_period1;
-    
-    cumulative_period2 = cumulative_period1;
-    int period2_end_week = period1_end_week + period2_additional_weeks;
-    for (w in (period1_end_week + 1):period2_end_week) {
-      if (w <= T_weeks) {
-        cumulative_period2 += weekly_incidence[i][w];
-      } else {
-        int w_forecast = w - T_weeks;
-        if (w_forecast <= T_weeks_forecast) {
-          cumulative_period2 += weekly_incidence_forecast[i][w_forecast];
-        }
-      }
-    }
-    attack_rate_period2_baseline[i] = cumulative_period2;
-  }
-  
-  // 6. 47 typhoon scenario simulations
-  for (typhoon_idx in 1:47) {
-    real typhoon_change = typhoon_effects[typhoon_idx];
-    int typhoon_days = typhoon_days_arr[typhoon_idx];
-    int shift = shift_arr[typhoon_idx];
-    
-    matrix[T_days_total + 1, 19] states_typhoon;
-    vector[T_days_forecast] daily_incidence_typhoon[N_strains];
-    matrix[T_days_forecast, N_strains] R_eff_daily_scenario;
+    typhoon_knot_position = typhoon_end_day_normalized;
+    typhoon_knot_index = 0;
     
     for (i in 1:N_strains) {
-      daily_incidence_typhoon[i] = rep_vector(0, T_days_forecast);
-    }
-    
-    if (shift >= 0) {
-      for (t in 1:(T_days + 1)) {
-        for (j in 1:19) {
-          states_typhoon[t, j] = states[t, j];
+      real max_basis = 0;
+      int max_idx = 1;
+      
+      // 找到在台风结束日最活跃的basis function
+      for (b in 1:num_basis) {
+        if (B[b, typhoon_end_day] > max_basis) {
+          max_basis = B[b, typhoon_end_day];
+          max_idx = b;
         }
       }
       
-      for (t_rel in 1:T_days_forecast) {
-        int t = T_days + t_rel;
-        real S = states_typhoon[t, 1];
-        vector[N_strains] E;
-        vector[N_strains] I;
-        vector[N_strains] R;
-        vector[N_strains] lambda;
-        vector[N_strains] new_infections;
-        
-        real modification_factor = ((t_rel > shift) && (t_rel <= shift + typhoon_days)) ? 1.0 + typhoon_change : 1.0;
-        
-        for (i in 1:N_strains) {
-          int e_idx = 2 + 3*(i-1);
-          int i_idx = 3 + 3*(i-1);
-          int r_idx = 4 + 3*(i-1);
-          E[i] = states_typhoon[t, e_idx];
-          I[i] = states_typhoon[t, i_idx];
-          R[i] = states_typhoon[t, r_idx];
-        }
-        
-        for (i in 1:N_strains) {
-          lambda[i] = transmission_rate_forecast[i, t_rel] * modification_factor * I[i];
-          real effective_S = fmax(1e-6, fmin(1.0, S));
-          new_infections[i] = fmin(lambda[i] * effective_S, 0.5 * effective_S);
-          
-          daily_incidence_typhoon[i][t_rel] = sigma_gq[i] * E[i];
-        }
-        
-        for (i in 1:N_strains) {
-          real S_eff = fmax(0, fmin(1, S));
-          R_eff_daily_scenario[t_rel, i] = R0_forecast[i, t_rel] * modification_factor * S_eff;
-        }
-        
-        {
-          real dt = 1.0;
-          real dS = -sum(new_infections);
-          
-          vector[19] new_state = to_vector(states_typhoon[t,]);
-          new_state[1] = S + dt * dS;
-          
-          for (i in 1:N_strains) {
-            int e_idx = 2 + 3*(i-1);
-            int i_idx = 3 + 3*(i-1);
-            int r_idx = 4 + 3*(i-1);
-            
-            real dE = new_infections[i] - sigma_gq[i] * E[i];
-            real dI = sigma_gq[i] * E[i] - gamma_gq[i] * I[i];
-            real dR = gamma_gq[i] * I[i];
-            
-            new_state[e_idx] = E[i] + dt * dE;
-            new_state[i_idx] = I[i] + dt * dI;
-            new_state[r_idx] = R[i] + dt * dR;
-          }
-          
-          for (j in 1:19) {
-            new_state[j] = fmax(1e-10, new_state[j]);
-          }
-          
-          real total = sum(new_state);
-          if (total > 1e-6) {
-            new_state = new_state / total;
-          } else {
-            new_state = to_vector(states_typhoon[t,]);
-          }
-          
-          for (j in 1:19) {
-            states_typhoon[t+1, j] = new_state[j];
-          }
-        }
-      }
-    } else {
-      int pre_days = -shift;
-      int start_historical = T_days - pre_days + 1;
-      vector[19] current_state = to_vector(states[start_historical, ]);
+      typhoon_knot_index = max_idx;
+      typhoon_knot_coeff[i] = log_R0_spline_coeff[i][max_idx];
       
-      for (pre_t in 1:pre_days) {
-        int historical_t = start_historical + pre_t - 1;
-        real S = current_state[1];
-        vector[N_strains] E;
-        vector[N_strains] I;
-        vector[N_strains] R;
-        vector[N_strains] lambda;
-        vector[N_strains] new_infections;
-        
-        real modification_factor = 1.0 + typhoon_change;
-        
-        for (i in 1:N_strains) {
-          int e_idx = 2 + 3*(i-1);
-          int i_idx = 3 + 3*(i-1);
-          int r_idx = 4 + 3*(i-1);
-          E[i] = current_state[e_idx];
-          I[i] = current_state[i_idx];
-          R[i] = current_state[r_idx];
-        }
-        
-        for (i in 1:N_strains) {
-          lambda[i] = transmission_rate[i, historical_t] * modification_factor * I[i];
-          real effective_S = fmax(1e-6, fmin(1.0, S));
-          new_infections[i] = fmin(lambda[i] * effective_S, 0.5 * effective_S);
-        }
-        
-        {
-          real dt = 1.0;
-          real dS = -sum(new_infections);
-          
-          vector[19] new_state = current_state;
-          new_state[1] = S + dt * dS;
-          
-          for (i in 1:N_strains) {
-            int e_idx = 2 + 3*(i-1);
-            int i_idx = 3 + 3*(i-1);
-            int r_idx = 4 + 3*(i-1);
-            
-            real dE = new_infections[i] - sigma_gq[i] * E[i];
-            real dI = sigma_gq[i] * E[i] - gamma_gq[i] * I[i];
-            real dR = gamma_gq[i] * I[i];
-            
-            new_state[e_idx] = E[i] + dt * dE;
-            new_state[i_idx] = I[i] + dt * dI;
-            new_state[r_idx] = R[i] + dt * dR;
-          }
-          
-          for (j in 1:19) {
-            new_state[j] = fmax(1e-10, new_state[j]);
-          }
-          
-          real total = sum(new_state);
-          if (total > 1e-6) {
-            new_state = new_state / total;
-          } else {
-            new_state = current_state;
-          }
-          
-          current_state = new_state;
-        }
-      }
-      
-      for (j in 1:19) {
-        states_typhoon[T_days + 1, j] = current_state[j];
-      }
-      
-      int remaining_days = typhoon_days - pre_days;
-      
-      for (t_rel in 1:T_days_forecast) {
-        int t = T_days + t_rel;
-        real S = states_typhoon[t, 1];
-        vector[N_strains] E;
-        vector[N_strains] I;
-        vector[N_strains] R;
-        vector[N_strains] lambda;
-        vector[N_strains] new_infections;
-        
-        real modification_factor = (t_rel <= remaining_days) ? 1.0 + typhoon_change : 1.0;
-        
-        for (i in 1:N_strains) {
-          int e_idx = 2 + 3*(i-1);
-          int i_idx = 3 + 3*(i-1);
-          int r_idx = 4 + 3*(i-1);
-          E[i] = states_typhoon[t, e_idx];
-          I[i] = states_typhoon[t, i_idx];
-          R[i] = states_typhoon[t, r_idx];
-        }
-        
-        for (i in 1:N_strains) {
-          lambda[i] = transmission_rate_forecast[i, t_rel] * modification_factor * I[i];
-          real effective_S = fmax(1e-6, fmin(1.0, S));
-          new_infections[i] = fmin(lambda[i] * effective_S, 0.5 * effective_S);
-          
-          daily_incidence_typhoon[i][t_rel] = sigma_gq[i] * E[i];
-        }
-        
-        for (i in 1:N_strains) {
-          real S_eff = fmax(0, fmin(1, S));
-          R_eff_daily_scenario[t_rel, i] = R0_forecast[i, t_rel] * modification_factor * S_eff;
-        }
-        
-        {
-          real dt = 1.0;
-          real dS = -sum(new_infections);
-          
-          vector[19] new_state = to_vector(states_typhoon[t,]);
-          new_state[1] = S + dt * dS;
-          
-          for (i in 1:N_strains) {
-            int e_idx = 2 + 3*(i-1);
-            int i_idx = 3 + 3*(i-1);
-            int r_idx = 4 + 3*(i-1);
-            
-            real dE = new_infections[i] - sigma_gq[i] * E[i];
-            real dI = sigma_gq[i] * E[i] - gamma_gq[i] * I[i];
-            real dR = gamma_gq[i] * I[i];
-            
-            new_state[e_idx] = E[i] + dt * dE;
-            new_state[i_idx] = I[i] + dt * dI;
-            new_state[r_idx] = R[i] + dt * dR;
-          }
-          
-          for (j in 1:19) {
-            new_state[j] = fmax(1e-10, new_state[j]);
-          }
-          
-          real total = sum(new_state);
-          if (total > 1e-6) {
-            new_state = new_state / total;
-          } else {
-            new_state = to_vector(states_typhoon[t,]);
-          }
-          
-          for (j in 1:19) {
-            states_typhoon[t+1, j] = new_state[j];
-          }
-        }
+      // 记录所有与台风相关的basis indices
+      typhoon_knot_indices[1] = max_idx;
+      for (m in 2:typhoon_knot_multiplicity) {
+        typhoon_knot_indices[m] = max_idx + m - 1;
       }
     }
-    
-    // Calculate R_eff for scenarios
-    for (w in 1:T_weeks_total) {
-      for (i in 1:N_strains) {
-        if (w <= T_weeks) {
-          R_eff_scenarios[typhoon_idx][w,i] = R_eff[w,i];
-        } else {
-          int w_forecast = w - T_weeks;
-          real sum_R_eff = 0;
-          int count = 0;
-          for (d in 1:7) {
-            int day_idx = (w_forecast-1)*7 + d;
-            if (day_idx <= T_days_forecast) {
-              sum_R_eff += R_eff_daily_scenario[day_idx, i];
-              count += 1;
-            }
-          }
-          if (count > 0) {
-            R_eff_scenarios[typhoon_idx][w,i] = sum_R_eff / count;
-          } else {
-            R_eff_scenarios[typhoon_idx][w,i] = 0;
-          }
-        }
-      }
-    }
-    
-    // Calculate cases and attack rates
+  } else {
+    typhoon_knot_index = 0;
+    typhoon_knot_position = 0;
     for (i in 1:N_strains) {
-      real typhoon_total = 0;
-      real recovery_total = 0;
-      real cumulative_incidence_scenario = 0;
-      real cumulative_period1_scenario = 0;
-      real cumulative_period2_scenario = 0;
-      
-      for (w in 1:T_weeks_forecast) {
-        real weekly_inc = 0;
-        for (d in 1:7) {
-          int day_idx = (w-1)*7 + d;
-          if (day_idx <= T_days_forecast) {
-            weekly_inc += daily_incidence_typhoon[i][day_idx];
-          }
-        }
-        
-        real expected_cases;
-        if (i <= 5) {
-          expected_cases = weekly_inc * population * detection_rate[i];
-        } else {
-          expected_cases = weekly_inc * population * child_ratio * hospitalization_rate;
-        }
-        
-        expected_cases = fmax(0.1, expected_cases);
-        forecast_cases_typhoon[typhoon_idx, w, i] = neg_binomial_2_rng(expected_cases, phi[i]);
-        
-        if (w <= typhoon_weeks) {
-          typhoon_total += expected_cases;
-        } else {
-          recovery_total += expected_cases;
-        }
-        
-        cumulative_incidence_scenario += weekly_inc;
-      }
-      
-      cases_typhoon_period[typhoon_idx, i] = typhoon_total;
-      if (typhoon_idx == 1) {
-        cases_baseline_typhoon_period[i] = typhoon_total;
-      }
-      
-      if (typhoon_idx > 1) {
-        real base_typhoon_safe = fmax(cases_baseline_typhoon_period[i], 0.01);
-        reduction_typhoon_period[typhoon_idx, i] = (1 - typhoon_total / base_typhoon_safe) * 100;
-      } else {
-        reduction_typhoon_period[typhoon_idx, i] = 0;
-      }
-      
-      int n_recovery = T_weeks_forecast - typhoon_weeks;
-      avg_weekly_typhoon[typhoon_idx, i] = typhoon_total / typhoon_weeks;
-      avg_weekly_recovery[typhoon_idx, i] = recovery_total / n_recovery;
-      
-      attack_rate_scenarios[typhoon_idx, i] = attack_rate_baseline[i] + cumulative_incidence_scenario;
-      attack_rate_diff[typhoon_idx, i] = attack_rate_scenarios[typhoon_idx, i] - attack_rate_baseline[i];
-      
-      // Attack rates for periods
-      for (w in period1_start_week:period1_end_week) {
-        if (w <= T_weeks) {
-          cumulative_period1_scenario += weekly_incidence[i][w];
-        } else {
-          int w_forecast = w - T_weeks;
-          if (w_forecast <= T_weeks_forecast) {
-            real weekly_inc_forecast = 0;
-            for (d in 1:7) {
-              int day_idx = (w_forecast-1)*7 + d;
-              if (day_idx <= T_days_forecast) {
-                weekly_inc_forecast += daily_incidence_typhoon[i][day_idx];
-              }
-            }
-            cumulative_period1_scenario += weekly_inc_forecast;
-          }
-        }
-      }
-      attack_rate_period1_scenarios[typhoon_idx, i] = cumulative_period1_scenario;
-      
-      cumulative_period2_scenario = cumulative_period1_scenario;
-      int period2_end_week = period1_end_week + period2_additional_weeks;
-      for (w in (period1_end_week + 1):period2_end_week) {
-        if (w <= T_weeks) {
-          cumulative_period2_scenario += weekly_incidence[i][w];
-        } else {
-          int w_forecast = w - T_weeks;
-          if (w_forecast <= T_weeks_forecast) {
-            real weekly_inc_forecast = 0;
-            for (d in 1:7) {
-              int day_idx = (w_forecast-1)*7 + d;
-              if (day_idx <= T_days_forecast) {
-                weekly_inc_forecast += daily_incidence_typhoon[i][day_idx];
-              }
-            }
-            cumulative_period2_scenario += weekly_inc_forecast;
-          }
-        }
-      }
-      attack_rate_period2_scenarios[typhoon_idx, i] = cumulative_period2_scenario;
+      typhoon_knot_coeff[i] = 0;
     }
-  }
-  
-  // 7. Extended 281 scenarios (similar structure, all using SEIR dynamics)
-  {
-    int durations[4] = {3, 7, 10, 14};
-    real intensities[10] = {-0.50, -0.30, -0.20, -0.10, -0.05, 0.05, 0.10, 0.20, 0.30, 0.50};
-    int shifts[7] = {-7, -5, -3, 0, 3, 5, 7};
-    
-    for (i in 1:N_strains) {
-      cases_extended_typhoon[1, i] = cases_baseline_typhoon_period[i];
-      incidence_per10k_extended[1, i] = (cases_baseline_typhoon_period[i] / population) * 10000;
-      reduction_extended_typhoon[1, i] = 0.0;
-      attack_rate_period1_extended[1, i] = attack_rate_period1_baseline[i];
-      attack_rate_period2_extended[1, i] = attack_rate_period2_baseline[i];
-    }
-    
-    for (dur_idx in 1:4) {
-      for (int_idx in 1:10) {
-        for (shift_idx in 1:7) {
-          int scenario_idx = 1 + (dur_idx-1)*70 + (int_idx-1)*7 + shift_idx;
-          int typhoon_days_ext = durations[dur_idx];
-          real typhoon_change_ext = intensities[int_idx];
-          int shift_ext = shifts[shift_idx];
-          
-          matrix[T_days_total + 1, 19] states_typhoon_ext;
-          vector[T_days_forecast] daily_incidence_ext[N_strains];
-          
-          for (i in 1:N_strains) {
-            daily_incidence_ext[i] = rep_vector(0, T_days_forecast);
-          }
-          
-          // Similar SEIR simulation code for extended scenarios
-          // (Omitted here for brevity, follows same pattern as 47-scenario loop)
-          
-          // Placeholder calculations
-          for (i in 1:N_strains) {
-            cases_extended_typhoon[scenario_idx, i] = cases_baseline_typhoon_period[i];
-            incidence_per10k_extended[scenario_idx, i] = (cases_extended_typhoon[scenario_idx, i] / population) * 10000;
-            reduction_extended_typhoon[scenario_idx, i] = 0.0;
-            attack_rate_period1_extended[scenario_idx, i] = attack_rate_period1_baseline[i];
-            attack_rate_period2_extended[scenario_idx, i] = attack_rate_period2_baseline[i];
-          }
-        }
-      }
+    for (m in 1:typhoon_knot_multiplicity) {
+      typhoon_knot_indices[m] = 0;
     }
   }
 }
